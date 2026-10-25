@@ -9,7 +9,8 @@
  * Desktop.
  *
  * Rules, in order:
- * - A running Desktop app is the supervisor. Wait for its proxy; never start a competing one.
+ * - A running Desktop app with a durable Desktop claim is the supervisor. Wait for its proxy;
+ *   never start a competing one. A process name alone is not ownership evidence.
  * - A durable Desktop claim with no running app: start Desktop (hidden, by the path its own
  *   login registration recorded — LaunchServices never picks the bundle) where that is
  *   verifiable, then wait. Elsewhere, fail with guidance. A missing Desktop process
@@ -43,9 +44,9 @@ export function planEnsureColdStart(facts: {
   desktopProcess: DesktopProcessState;
   platform: NodeJS.Platform;
 }): EnsureColdStartPlan {
-  if (facts.desktopProcess === "running") return { kind: "wait-desktop" };
   if (facts.ownership === "unknown" || facts.desktopProcess === "unknown") return { kind: "refuse", reason: "unverified" };
   if (facts.ownership === "other") return { kind: "spawn-cli" };
+  if (facts.desktopProcess === "running") return { kind: "wait-desktop" };
   return facts.platform === "darwin" ? { kind: "launch-desktop" } : { kind: "refuse", reason: "desktop-unlaunchable" };
 }
 
