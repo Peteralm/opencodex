@@ -52,7 +52,12 @@ OS reads do not earn recovery credit.
 
 No locator files are read or written. Without an independently identified native process, an unrelated
 renamed process cannot suppress ordinary CLI startup. With an identified process, missing or
-inconclusive live evidence is unknown and `ensure` refuses. A verified different configuration
+inconclusive live evidence is unknown and `ensure` refuses. A platform that cannot bind a live
+mapped image marks its verdict `unsupported` only when every path and file observation succeeded
+and the selected files were unchanged across the check: it is a structural limitation rather than conflicting
+evidence, so it earns no recovery credit and still refuses an unclaimed start, but it cannot veto
+the bounded wait a durable claim and a running app already authorize. A claim never outranks
+genuinely conflicting observations. A verified different configuration
 home is irrelevant; a matching active recovery waits for the existing readiness probe, and a
 matching stopped intent refuses with Start Proxy guidance. Ownership is read after this async
 inspection; a new or unreadable durable claim is not bypassed by an earlier recovery snapshot.
@@ -65,8 +70,9 @@ pins its own Bun/source entrypoint and bypasses that launcher. Root-owned Debian
 that combination. A direct Bun/source CLI on macOS or Windows has no installation anchor here,
 even for an official signed Desktop; arbitrary unsigned per-user Linux copies have the same
 limitation. Names and files do not create an anchor. Use the matching bundled CLI or recreate
-the shim from Desktop. An independently observed Windows sibling remains unverified and refuses
-automatic cold start even when its on-disk signatures are valid.
+the shim from Desktop. An independently observed Windows sibling remains unverified: it earns no
+recovery credit even when its on-disk signatures are valid, still refuses an unclaimed automatic
+cold start, and no longer vetoes the bounded wait a durable claim and running app already authorize.
 Explicit `ocx start` and the existing consented service installation flow remain user-controlled.
 
 `tests/service/service-desktop-recovery.test.ts` covers protocol, OS evidence races and a real Linux

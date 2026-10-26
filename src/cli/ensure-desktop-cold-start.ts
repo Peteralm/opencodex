@@ -9,20 +9,27 @@
  * Desktop.
  *
  * Rules, in order:
- * - Independently verified native recovery keeps its replacement, including without a claim.
- *   The current bundled CLI (or protected system installation) anchors the executable; the
+ * - Facts re-observed after the asynchronous recovery inspection keep first refusal:
+ *   ownership or the process list that cannot be read is not evidence of absence.
+ * - Verified native intent wins over every other signal: an independently verified recovery
+ *   keeps its replacement, including without a claim, while a verified stop refuses. The
+ *   current bundled CLI (or protected system installation) anchors the executable; the
  *   accepted socket, process incarnation and fresh native intent bind the recovery proof.
+ * - Conflicting native evidence — drift, contradiction or an unprovable observation on a
+ *   platform that can verify — refuses even under a durable claim. A claim outranks only
+ *   the structurally unsupported verdict of a platform with no live-image binding.
+ * - An unclaimed start cannot be authorized or suppressed by a name, locator file or
+ *   unverifiable observation: unknown still refuses; otherwise the ordinary CLI cold start
+ *   runs. Unsupported per-user installations do not acquire authority from their
+ *   self-reported identity; use their bundled CLI.
  * - A running Desktop app with a durable Desktop claim is the supervisor. Wait for its proxy;
- *   never start a competing one. A process name alone is not ownership evidence.
- * - A durable Desktop claim with no running app: start Desktop (hidden, by the path its own
- *   login registration recorded — LaunchServices never picks the bundle) where that is
- *   verifiable, then wait. Elsewhere, fail with guidance. A missing Desktop process
- *   never authorizes a CLI proxy by itself; handing ownership to the CLI stays an explicit
+ *   never start a competing one. A process name alone is not ownership evidence. A durable
+ *   Desktop claim with no running app: start Desktop (hidden, by the path its own login
+ *   registration recorded — LaunchServices never picks the bundle) where that is verifiable,
+ *   then wait. Elsewhere, fail with guidance. A missing Desktop process never authorizes a
+ *   CLI proxy by itself; an unsupported verdict beside an absent observation is
+ *   contradictory and refuses. Handing ownership to the CLI stays an explicit
  *   `ocx service install` consent step.
- * - Ownership or the process list that cannot be read is not evidence of absence: refuse.
- * - No claim and no independently identified Desktop recovery: the ordinary CLI cold start.
- *   Names and locator files alone cannot suppress it. Unsupported per-user installations do
- *   not acquire authority from their self-reported identity; use their bundled CLI.
  *
  * Concurrent shim launches share one Desktop launch through a lease file held by a live process;
  * every caller then waits on the same readiness probe.
@@ -51,12 +58,20 @@ export function planEnsureColdStart(facts: {
   platform: NodeJS.Platform;
   recovery?: DesktopRecoveryEvidence;
 }): EnsureColdStartPlan {
-  if (facts.recovery?.kind === "unknown") return { kind: "refuse", reason: "unverified" };
   if (facts.ownership === "unknown" || facts.desktopProcess === "unknown") return { kind: "refuse", reason: "unverified" };
   if (facts.recovery?.kind === "recovering") return { kind: "wait-desktop" };
   if (facts.recovery?.kind === "stopped") return { kind: "refuse", reason: "desktop-stopped" };
-  if (facts.ownership === "other") return { kind: "spawn-cli" };
+  // Drifted or contradictory native evidence refuses even under a durable claim; the claim
+  // outranks only the structurally unsupported verdict of a platform with no image binding.
+  if (facts.recovery?.kind === "unknown" && facts.recovery.unsupported !== true) return { kind: "refuse", reason: "unverified" };
+  if (facts.ownership === "other") {
+    // An unclaimed start cannot be authorized or suppressed by an unverifiable observation.
+    return facts.recovery?.kind === "unknown" ? { kind: "refuse", reason: "unverified" } : { kind: "spawn-cli" };
+  }
   if (facts.desktopProcess === "running") return { kind: "wait-desktop" };
+  // A matched native process beside an absent observation is contradictory; refuse rather
+  // than launch a new app or guess at the supervisor's state.
+  if (facts.recovery?.kind === "unknown") return { kind: "refuse", reason: "unverified" };
   return facts.platform === "darwin" ? { kind: "launch-desktop" } : { kind: "refuse", reason: "desktop-unlaunchable" };
 }
 

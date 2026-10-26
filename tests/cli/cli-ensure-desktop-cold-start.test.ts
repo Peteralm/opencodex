@@ -92,6 +92,35 @@ describe("ocx ensure cold start under OpenCodex Desktop (#6971)", () => {
     }
   });
 
+  test("a structurally unsupported verdict keeps a claimed running Desktop's wait; conflicting evidence still refuses", async () => {
+    const calls = fresh();
+    const result = await runDesktopColdStart({
+      ...deps({ ownership: "desktop", process: "running", platform: "win32" }, calls),
+      desktopRecovery: async () => ({ kind: "unknown" as const, unsupported: true }),
+    });
+    expect(result).toEqual({ kind: "live", live: { port: 10100 } });
+    expect(calls).toEqual({ launches: 0, waits: [DESKTOP_COLD_START_TIMEOUT_MS], released: 0 });
+
+    for (const platform of ["darwin", "linux", "win32"] as const) {
+      expect(planEnsureColdStart({ ownership: "desktop", desktopProcess: "running", platform, recovery: { kind: "unknown", unsupported: true } }))
+        .toEqual({ kind: "wait-desktop" });
+      expect(planEnsureColdStart({ ownership: "desktop", desktopProcess: "running", platform, recovery: { kind: "unknown" } }))
+        .toEqual({ kind: "refuse", reason: "unverified" });
+      expect(planEnsureColdStart({ ownership: "desktop", desktopProcess: "absent", platform, recovery: { kind: "unknown", unsupported: true } }))
+        .toEqual({ kind: "refuse", reason: "unverified" });
+      expect(planEnsureColdStart({ ownership: "other", desktopProcess: "running", platform, recovery: { kind: "unknown", unsupported: true } }))
+        .toEqual({ kind: "refuse", reason: "unverified" });
+      expect(planEnsureColdStart({ ownership: "unknown", desktopProcess: "running", platform, recovery: { kind: "unknown", unsupported: true } }))
+        .toEqual({ kind: "refuse", reason: "unverified" });
+      expect(planEnsureColdStart({ ownership: "desktop", desktopProcess: "running", platform, recovery: { kind: "stopped" } }))
+        .toEqual({ kind: "refuse", reason: "desktop-stopped" });
+      expect(planEnsureColdStart({ ownership: "other", desktopProcess: "absent", platform, recovery: { kind: "unknown", unsupported: true } }))
+        .toEqual({ kind: "refuse", reason: "unverified" });
+    }
+    expect(planEnsureColdStart({ ownership: "desktop", desktopProcess: "absent", platform: "win32", recovery: { kind: "none" } }))
+      .toEqual({ kind: "refuse", reason: "desktop-unlaunchable" });
+  });
+
   test("ownership is observed after asynchronous native evidence, so a new claim still governs startup", async () => {
     let ownership: DesktopOwnershipState = "other";
     const calls = fresh();

@@ -11,7 +11,8 @@ const DOMAIN = "ocx-desktop-recovery-v1";
 const PROBE_BUDGET_MS = 8_000;
 const CONNECTION_BUDGET_MS = 750;
 const MAX_RESPONSE_BYTES = 8_512;
-export type DesktopRecoveryEvidence = { kind: "none" | "recovering" | "stopped" | "unknown" };
+/** An `unsupported` unknown is a platform's structural lack of live-image binding, not conflicting evidence. */
+export type DesktopRecoveryEvidence = { kind: "none" | "recovering" | "stopped" | "unknown"; unsupported?: boolean };
 export interface RecoveryEndpoint { pid: number; port: number }
 interface RecoveryAnswer { pid: number; instance: string; state: "recovering" | "stopped" | "unknown"; home: string | null }
 
@@ -120,7 +121,7 @@ export async function inspectDesktopRecovery(overrides: Partial<DesktopRecoveryI
     let result: DesktopRecoveryEvidence = { kind: "none" };
     for (const process of processes) {
       const image = images.find(image => image.app === process.app && image.image === process.image);
-      if (!image?.trusted) return { kind: "unknown" };
+      if (!image?.trusted) return image?.unsupported === true ? { kind: "unknown", unsupported: true } : { kind: "unknown" };
       let evidence: DesktopRecoveryEvidence = { kind: "unknown" };
       const ports = io.listeners(process);
       if (ports.length > 8 || ports.some(port => !Number.isSafeInteger(port) || port < 1 || port > 65535)) return { kind: "unknown" };

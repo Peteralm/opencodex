@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectDesktopRecovery, parseRecoveryAnswer, recoveryHomeIdentity,
   type DesktopRecoveryIo } from "../../src/service/desktop-recovery";
 import { linuxRecoveryBirth, linuxRecoveryListeners, linuxRecoverySocket, macRecoveryRequirement,
-  parseMacRecoveryPath, recoverySibling, verifyMacRecoveryImage } from "../../src/service/desktop-recovery-process";
+  parseMacRecoveryPath, recoveryImageCandidate, recoverySibling, verifyMacRecoveryImage } from "../../src/service/desktop-recovery-process";
 import { repoPath } from "../helpers/repo-root";
 
 const instance = "a".repeat(32);
@@ -55,6 +55,57 @@ describe("native Desktop recovery evidence", () => {
       { open: async () => { throw new Error("refused"); } },
       { owner: () => { throw new Error("foreign socket"); } },
     ]) expect(await inspectDesktopRecovery(fixture(changes))).toEqual({ kind: "unknown" });
+  });
+
+  test("a structurally unsupported image reports the platform limit, not conflicting evidence", async () => {
+    expect(await inspectDesktopRecovery(fixture({ images: () => [{ ...image, trusted: false, unsupported: true }] })))
+      .toEqual({ kind: "unknown", unsupported: true });
+    expect(await inspectDesktopRecovery(fixture({ images: () => [{ ...image, trusted: false }] })))
+      .toEqual({ kind: "unknown" });
+  });
+
+  test("a Windows candidate earns the platform mark only from complete stable observations", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ocx-recovery-win-")));
+    const cli = join(root, "ocx.exe"), app = join(root, "opencodex-desktop.exe");
+    writeFileSync(cli, "cli"); writeFileSync(app, "app");
+    chmodSync(cli, 0o755); chmodSync(app, 0o755);
+    const sibling = () => app;
+    const nativeAt = (image: { app: string; image: string }) => [{ pid: 123, born: "1", image: image.image, app: image.app }];
+    try {
+      const stable = recoveryImageCandidate({ cli, app, rootOnly: false }, "win32", undefined, { sibling });
+      expect(stable).toMatchObject({ app, cli, trusted: false, unsupported: true });
+      expect(await inspectDesktopRecovery(fixture({ images: () => [stable], processes: () => nativeAt(stable) })))
+        .toEqual({ kind: "unknown", unsupported: true });
+
+      // Identity drift on either selected file is conflicting evidence, never a platform limit.
+      for (const changed of [app, cli]) {
+        let observations = 0;
+        const drifted = recoveryImageCandidate({ cli, app, rootOnly: false }, "win32", undefined,
+          { sibling, identify: path => `${path}:${path === changed ? ++observations : 0}` });
+        expect(drifted.trusted).toBe(false);
+        expect(drifted.unsupported).toBeUndefined();
+        expect(await inspectDesktopRecovery(fixture({ images: () => [drifted], processes: () => nativeAt(drifted) })))
+          .toEqual({ kind: "unknown" });
+      }
+
+      // A thrown observation keeps the derived path but never the platform mark.
+      const missing = recoveryImageCandidate({ cli: join(root, "gone-ocx.exe"), app, rootOnly: false }, "win32", undefined, { sibling });
+      expect(missing.trusted).toBe(false);
+      expect(missing.unsupported).toBeUndefined();
+      expect(await inspectDesktopRecovery(fixture({ images: () => [missing], processes: () => nativeAt(missing) })))
+        .toEqual({ kind: "unknown" });
+
+      // A file replaced after the stability check is never adopted as the verified identity:
+      // the image keeps the compared value, and the consumer's later B observation refuses.
+      let appReads = 0;
+      const replaced = recoveryImageCandidate({ cli, app, rootOnly: false }, "win32", undefined,
+        { sibling, identify: path => path === app ? (++appReads <= 2 ? "verified-A" : "replaced-B") : "stable-cli" });
+      expect(replaced).toMatchObject({ image: "verified-A", trusted: false, unsupported: true });
+      expect(await inspectDesktopRecovery(fixture({
+        images: () => [replaced],
+        processes: () => [{ pid: 123, born: "1", image: "replaced-B", app }],
+      }))).toEqual({ kind: "unknown" });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test("the accepted socket owner is proven before any protocol wait", async () => {

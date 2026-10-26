@@ -6,7 +6,7 @@ import { basename, dirname, join, posix, win32 } from "node:path";
 import { isStandaloneBinary } from "../lib/standalone";
 import { resolveTrustedWindowsPowerShellExe } from "../lib/windows-elevation";
 
-export interface RecoveryImage { app: string; cli: string; image: string; trusted: boolean; macRequirement?: string }
+export interface RecoveryImage { app: string; cli: string; image: string; trusted: boolean; unsupported?: boolean; macRequirement?: string }
 export interface RecoveryProcess { pid: number; born: string; image: string; app: string }
 export interface RecoveryConnection { serverPort: number; clientPort: number }
 export type RecoveryExecute = (command: string, args: string[], env?: Record<string, string>, captureStderr?: boolean) => string;
@@ -128,45 +128,70 @@ export function recoveryImages(execute: RecoveryExecute = run): RecoveryImage[] 
     candidates.push({ cli: "/usr/bin/ocx", app: "/usr/bin/opencodex-desktop", rootOnly: true });
   }
   const images: RecoveryImage[] = [];
-  for (const candidate of candidates) {
-    const unavailable = { app: candidate.app, cli: candidate.cli, image: "unavailable", trusted: false };
-    try {
-      const app = realpathSync(candidate.app), cli = realpathSync(candidate.cli);
-      if (app !== candidate.app || dirname(app) !== dirname(cli) || recoverySibling(cli, platform) !== app
-        || !statSync(app).isFile() || !statSync(cli).isFile()) { images.push(unavailable); continue; }
-      accessSync(app, constants.X_OK); accessSync(cli, constants.X_OK);
-      const before = `${fileIdentity(app)}|${fileIdentity(cli)}`;
-      let trusted = false;
-      let macRequirement: string | undefined;
-      if (platform !== "win32") {
-        trusted = protectedPosix(app, candidate.rootOnly) && protectedPosix(cli, candidate.rootOnly)
-          && protectedPosix(dirname(app), candidate.rootOnly);
-        if (candidate.rootOnly) {
-          for (let directory = dirname(app); directory !== "/"; directory = dirname(directory)) trusted &&= protectedPosix(directory, true);
-        }
-        if (platform === "darwin" && trusted) {
-          const bundle = dirname(dirname(dirname(app)));
-          const info = JSON.parse(execute("/usr/bin/plutil", ["-convert", "json", "-o", "-", join(bundle, "Contents", "Info.plist")]));
-          trusted = info.CFBundleIdentifier === "com.opencodex.desktop" && info.CFBundleExecutable === "opencodex-desktop";
-          if (trusted) {
-            execute("/usr/bin/codesign", ["--verify", "--strict", "--deep", bundle]);
-            verifyMacRecoveryImage(process.pid, macRecoveryRequirement(cli, execute), execute);
-            macRequirement = macRecoveryRequirement(app, execute);
-          }
+  for (const candidate of candidates) images.push(recoveryImageCandidate(candidate, platform, execute));
+  return images;
+}
+
+/** The OS/path observations a candidate needs; only the derivations, never the decisions. */
+export interface RecoveryImageIo {
+  sibling?: (execPath: string, platform: NodeJS.Platform) => string | null;
+  identify?: (path: string) => string;
+}
+
+/**
+ * Observe one anchored candidate. `unsupported` is earned only by a fully observed and
+ * unchanged Windows candidate: unavailable files, thrown observations and identity drift are
+ * conflicting evidence, never a platform limitation.
+ */
+export function recoveryImageCandidate(
+  candidate: { cli: string; app: string; rootOnly: boolean },
+  platform: NodeJS.Platform,
+  execute: RecoveryExecute = run,
+  io: RecoveryImageIo = {},
+): RecoveryImage {
+  const sibling = io.sibling ?? recoverySibling;
+  const identify = io.identify ?? fileIdentity;
+  const unavailable: RecoveryImage = { app: candidate.app, cli: candidate.cli, image: "unavailable", trusted: false };
+  try {
+    const app = realpathSync(candidate.app), cli = realpathSync(candidate.cli);
+    if (app !== candidate.app || dirname(app) !== dirname(cli) || sibling(cli, platform) !== app
+      || !statSync(app).isFile() || !statSync(cli).isFile()) return unavailable;
+    accessSync(app, constants.X_OK); accessSync(cli, constants.X_OK);
+    const before = `${identify(app)}|${identify(cli)}`;
+    let trusted = false;
+    let macRequirement: string | undefined;
+    if (platform !== "win32") {
+      trusted = protectedPosix(app, candidate.rootOnly) && protectedPosix(cli, candidate.rootOnly)
+        && protectedPosix(dirname(app), candidate.rootOnly);
+      if (candidate.rootOnly) {
+        for (let directory = dirname(app); directory !== "/"; directory = dirname(directory)) trusted &&= protectedPosix(directory, true);
+      }
+      if (platform === "darwin" && trusted) {
+        const bundle = dirname(dirname(dirname(app)));
+        const info = JSON.parse(execute("/usr/bin/plutil", ["-convert", "json", "-o", "-", join(bundle, "Contents", "Info.plist")]));
+        trusted = info.CFBundleIdentifier === "com.opencodex.desktop" && info.CFBundleExecutable === "opencodex-desktop";
+        if (trusted) {
+          execute("/usr/bin/codesign", ["--verify", "--strict", "--deep", bundle]);
+          verifyMacRecoveryImage(process.pid, macRecoveryRequirement(cli, execute), execute);
+          macRequirement = macRecoveryRequirement(app, execute);
         }
       }
-      // Windows path/Authenticode observations cannot bind a live mapped process image to
-      // the current file. A running independently selected sibling remains unknown there.
-      if (before !== `${fileIdentity(app)}|${fileIdentity(cli)}`) trusted = false;
-      images.push({ app, cli, image: fileIdentity(app), trusted, ...(macRequirement ? { macRequirement } : {}) });
-    } catch {
-      // A missing/unreadable image can still be mapped by a live process. Preserve the
-      // independently derived path for OS exclusion/unknown; it never gets positive credit.
-      try { images.push({ ...unavailable, image: fileIdentity(candidate.app) }); }
-      catch { images.push(unavailable); }
     }
+    // Windows path/Authenticode observations cannot bind a live mapped process image to
+    // the current file. A running independently selected sibling remains unknown there.
+    // The recorded identity is the exact value the stability check compared; a fresh read
+    // here could adopt a post-check replacement as verified.
+    const afterApp = identify(app), afterCli = identify(cli);
+    const unchanged = before === `${afterApp}|${afterCli}`;
+    if (!unchanged) trusted = false;
+    return { app, cli, image: afterApp, trusted,
+      ...(platform === "win32" && unchanged ? { unsupported: true } : {}), ...(macRequirement ? { macRequirement } : {}) };
+  } catch {
+    // A missing/unreadable image can still be mapped by a live process. Preserve the
+    // independently derived path for OS exclusion/unknown; it never gets positive credit.
+    try { return { ...unavailable, image: identify(candidate.app) }; }
+    catch { return unavailable; }
   }
-  return images;
 }
 
 /** Parse the kernel start-time field after comm, which can itself contain spaces and ')'. */
