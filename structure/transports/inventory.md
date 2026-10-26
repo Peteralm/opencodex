@@ -394,12 +394,17 @@ the greater of 32 MiB or 128 times the coded bytes consumed, so highly compresse
 
 `src/lib/http-response-semantics.ts` compares the exact Content-Type type/subtype
 case-insensitively, ignoring surrounding whitespace and semicolon parameters. The internal JEV
-decision invoker, routed compact collector, compaction recovery, and shared combo preflight use this rule to
-select SSE decoding. `Text/Event-Stream; charset=UTF-8` selects the event-stream path; a different
+decision invoker, routed compact collector, compaction recovery, shared combo preflight, and native
+Responses delivery use this rule to select SSE decoding. `Text/Event-Stream; charset=UTF-8` selects the event-stream path; a different
 subtype or a parameter that merely mentions `text/event-stream` does not. Response headers and
 body bytes retain their original values. The JEV, reasoning-retention routing, and compaction
 recovery suites cover the resulting decision, opaque compact output, and recovery dispatch. The combo
 preflight leaves explicit non-SSE types unread; its caller-controlled missing-type fallback remains available.
+Native delivery also matches JSON exactly before bounded decoding; unrelated types retain the raw relay.
+Its canonical missing-type SSE fallback and plaintext V2 typed-event classification retain their own
+admission rules. The buffered required-tool guard inspects only exact JSON media types. Native delivery,
+missing-type fallback, plaintext classification and required-tool body ownership are covered by
+`tests/responses/passthrough-media-type.test.ts`.
 
 ## Raw transport null-body statuses
 

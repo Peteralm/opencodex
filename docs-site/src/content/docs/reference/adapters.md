@@ -230,9 +230,9 @@ WebSocket proxy settings fall back to HTTP/SSE. HTTP fetch-based Responses handl
 `config.proxy` or a SOCKS5 `ALL_PROXY` uses the built-in tunnel when `NO_PROXY` does not exempt
 the target. Scheme-specific HTTP(S) proxy variables retain their separate native handling;
 non-SOCKS `ALL_PROXY` is not a native HTTP fetch route.
-Internal model decisions, compaction responses, and combo failover accept valid event-stream media
+Internal model decisions, compaction responses, combo failover, and native Responses delivery accept valid event-stream media
 types regardless of casing or parameters, including `Text/Event-Stream; charset=UTF-8`. Other explicit
-media types retain their original format even when a parameter mentions `text/event-stream`.
+media types retain their original format even when a parameter mentions `text/event-stream`. Native delivery also identifies JSON by its exact media type; a JSON name inside a parameter does not select the JSON decoder. Its existing missing-header SSE fallback and plaintext V2 event validation still apply.
 
 Noncanonical Responses gateways receive Codex's client-executed `tool_search` declaration as a
 collision-safe public function tool. Matching request history and JSON/SSE function calls are
@@ -332,6 +332,14 @@ MiMo model Command Code serves.
 **Auth:** `key` (`x-api-key` by default, or `Authorization: Bearer` with `apiKeyTransport: "bearer"`) or `oauth` (Bearer + `anthropic-beta`, for Claude Pro/Max).
 
 - Converts messages to Anthropic content blocks (text, base64 image, `tool_use`, `thinking`).
+- Routed Codex compaction keeps the client tool catalog, system prompt and tool-selection
+  options to preserve their prompt-cache prefix. Summary requests disable search/media
+  sidecars; upstream-hosted tools retain their declarations with `tool_choice: none`, as does a
+  mandatory tool choice, while the advertised catalog stays the same. A request that advertises a
+  sidecar web-search tool (for example Exa) still changes its tool prefix on compaction.
+  A summary that attempts a tool call fails without publishing a function call or replacing
+  history. A successful summary returns exactly one compaction item. Image normalization
+  and the existing one-shot tighter-image retry after HTTP 413 remain unchanged.
 - Translated Anthropic Messages reasoning replay shares the request translation budget, including
   encoding/decoding copy overhead. Requests exceeding it return HTTP 413 with
   `translation_buffer_limit`; signatures and opaque reasoning data are never truncated to fit.
