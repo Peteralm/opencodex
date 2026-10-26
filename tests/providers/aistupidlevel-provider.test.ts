@@ -19,7 +19,8 @@ import { isModelVisionSidecarConsumer, isVisionSidecarConsumer } from "../../src
 import { requiresVisionPreprocessing } from "../../src/vision/plan";
 import { withStubbedProviderFetch } from "../helpers/catalog-provider-fetch";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
-import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { removeTreeAfterBackgroundWork } from "../helpers/remove-tree";
+import { SERVER_BUDGET_MS } from "../helpers/test-budget";
 
 const originalFetch = globalThis.fetch;
 const baseUrl = "https://aistupidlevel.info/v1";
@@ -125,7 +126,7 @@ describe("AI Stupid Level text-only contract for pinned models", () => {
   const IMAGE = "data:image/png;base64,aGVsbG8taW1hZ2UtYnl0ZXM=";
   let previousHome: string | undefined;
   let home = "";
-  let codexHome: IsolatedCodexHome;
+  let codexHome: IsolatedCodexHome | null = null;
   let mainCalls: Array<Record<string, unknown>>;
 
   beforeEach(() => {
@@ -154,13 +155,25 @@ describe("AI Stupid Level text-only contract for pinned models", () => {
     }) as typeof fetch;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearModelCache();
     resetVisionDescriptionCache();
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
-    codexHome.restore();
-    removeTreeWithRetry(home);
+    try {
+      // A case can leave tracked teardown work (config-dir ACL hardening, an icacls
+      // reap) holding a file in either fixture tree. Settle and reap before removing,
+      // and remove both through the same drain-aware path: codexHome.restore() would
+      // delete its tree synchronously ahead of the drain and swallow a sharing
+      // violation. The env restore is unconditional so a retained, named tree never
+      // leaks into the next case's config resolution.
+      if (home) await removeTreeAfterBackgroundWork(home);
+      if (codexHome) await removeTreeAfterBackgroundWork(codexHome.path);
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      codexHome?.restoreEnvironment();
+      home = "";
+      codexHome = null;
+    }
   });
 
   test("a pinned live id needs vision preprocessing at the preset destination", () => {
@@ -225,5 +238,5 @@ describe("AI Stupid Level text-only contract for pinned models", () => {
     } finally {
       await server.stop(true);
     }
-  });
+  }, SERVER_BUDGET_MS); // the file's only cases binding a real server; Windows startup measured ~4.8s of Bun's 5s default.
 });
