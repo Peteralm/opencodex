@@ -152,9 +152,7 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     if (!m) {
       // A list-ish line with no URL may be a title whose URL is on the next line. Only treat it as a
       // pending title when it looks like a list item; otherwise it's prose → stop.
-      if (/^[-*>\d.)]/.test(raw) || pendingTitle === null) {
-        if (/^[-*>\d.)]/.test(raw)) { pendingTitle = raw; lastConsumed = i; continue; }
-      }
+      if (pendingTitle === null && /^[-*>\d.)]/.test(raw)) { pendingTitle = raw; continue; }
       break;
     }
     // A non-HTTP URI embedded in prose is not sufficient to classify the line as a citation.
@@ -163,11 +161,14 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     if (!httpMatch && !/^[-*>\d.)]/.test(raw) && m.index !== 0) break;
     const url = cleanUrl(m[0]);
     if (!url) { break; }
+    const inlinePrefix = raw.slice(0, m.index);
+    const inlineTitle = cleanTitle(inlinePrefix);
+    // A self-titled citation does not prove that the preceding bullet was its title.
+    if (pendingTitle !== null && inlineTitle) break;
     consumedSourceLine = true;
     lastConsumed = i;
     // Title: text before the URL on this line, else a buffered title from a preceding line.
-    const inlinePrefix = raw.slice(0, m.index);
-    const title = cleanTitle(inlinePrefix) || (pendingTitle ? cleanTitle(pendingTitle) : "");
+    const title = inlineTitle || (pendingTitle ? cleanTitle(pendingTitle) : "");
     pendingTitle = null;
     if (seen.has(url)) continue;
     if (appendSafeWebSearchSource(sources, title ? { url, title } : { url })) seen.add(url);

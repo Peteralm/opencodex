@@ -57,3 +57,5 @@ routing. Do not infer an exact account from caller-supplied account headers, pro
 selection, connection identity, or other ambient state; concurrent threads could cross-route
 credentials. Extending exact routing to those endpoints requires an opaque client correlation that
 can be bound server-side to a previously validated selector.
+
+Trailing source extraction in `src/web-search/parse.ts` pairs a pending title with a following URL only when that URL has no title of its own. An unmatched bullet remains answer text; a second unmatched or self-titled entry ends the source list rather than discarding the first.
