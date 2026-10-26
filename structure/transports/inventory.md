@@ -394,11 +394,12 @@ the greater of 32 MiB or 128 times the coded bytes consumed, so highly compresse
 
 `src/lib/http-response-semantics.ts` compares the exact Content-Type type/subtype
 case-insensitively, ignoring surrounding whitespace and semicolon parameters. The internal JEV
-decision invoker, routed compact collector, and compaction recovery preflight use this rule to
+decision invoker, routed compact collector, compaction recovery, and shared combo preflight use this rule to
 select SSE decoding. `Text/Event-Stream; charset=UTF-8` selects the event-stream path; a different
 subtype or a parameter that merely mentions `text/event-stream` does not. Response headers and
 body bytes retain their original values. The JEV, reasoning-retention routing, and compaction
-recovery suites cover the resulting decision, opaque compact output, and recovery dispatch.
+recovery suites cover the resulting decision, opaque compact output, and recovery dispatch. The combo
+preflight leaves explicit non-SSE types unread; its caller-controlled missing-type fallback remains available.
 
 ## Raw transport null-body statuses
 

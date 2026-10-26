@@ -6,6 +6,10 @@ An HTTP 200 does not by itself commit a streaming combo child. The combo parent 
 downstream Responses SSE through `src/server/responses/combo-stream-preflight.ts`, which owns one
 reader and buffers only until one of these boundaries:
 
+SSE selection uses the [exact internal media-type match](inventory.md#internal-response-media-types).
+Explicit non-SSE types pass through unread, including parameters or longer subtypes containing the
+event-stream token. A caller can still opt into inspecting a response without a content type.
+
 Native post-header reset recovery shares that boundary, because it is asking the same question
 about the same bytes. With `replayReadErrors`, the preflight reports the stage it observed —
 `headers-only` before any parsed event, `protocol-prelude` after `response.created`,
