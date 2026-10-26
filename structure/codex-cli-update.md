@@ -238,6 +238,9 @@ running-record publication; only that invocation releases the reservation after 
 Competing deliveries cannot clear the live owner's completion authority. An unpublished verified
 ledger temp is deleted through its held handle before close. Successful rename disables that
 cleanup permanently for the invocation, including failures during published-name readback or flush.
+The store checks the held ancestors and config root against the normalized DOS long name with
+the same comparison used by `src/codex/windows-installation-files.ts`; 8.3 aliases refuse before
+ledger access, and a missing config root is created only beneath an already canonical held parent.
 
 An ACL-query timeout fails closed without accepting a late result. Its PowerShell child may still
 hold transient handles while termination settles, so lock cleanup may fail and retain a busy mutex;

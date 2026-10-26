@@ -67,6 +67,7 @@ import {
   CODEX_CLI_JOB_STORE_DIR, CODEX_CLI_JOB_STORE_FILE, CODEX_CLI_JOB_STORE_LOCK,
   CODEX_CLI_JOB_STORE_MAX_BYTES, CodexCliJobStoreBusyError,
 } from "./cli-update-job-execution";
+import { windowsCanonicalPathMatches } from "./windows-installation-files";
 
 const KERNEL_SYMBOLS = {
   GetDriveTypeW: { args: ["ptr"], returns: "u32" },
@@ -75,6 +76,7 @@ const KERNEL_SYMBOLS = {
   GetFileInformationByHandleEx: { args: ["u64", "i32", "ptr", "u32"], returns: "i32" },
   SetFileInformationByHandle: { args: ["u64", "i32", "ptr", "u32"], returns: "i32" },
   GetFileType: { args: ["u64"], returns: "u32" },
+  GetFinalPathNameByHandleW: { args: ["u64", "ptr", "u32", "u32"], returns: "u32" },
   ReadFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
   SetFilePointerEx: { args: ["u64", "i64", "ptr", "u32"], returns: "i32" },
   FlushFileBuffers: { args: ["u64"], returns: "i32" },
@@ -211,6 +213,13 @@ function inspect(ctx: Ctx, handle: bigint, directory: boolean): StoreInspection 
 
 function sameIdentity(a: StoreIdentity, b: StoreIdentity): boolean {
   return a.volumeSerial === b.volumeSerial && a.fileId === b.fileId;
+}
+
+function assertCanonicalPath(ctx: Ctx, handle: bigint, path: string): void {
+  const output = Buffer.alloc(32768 * 2);
+  const length = ctx.kernel.symbols.GetFinalPathNameByHandleW!(handle, ctx.ffi.ptr(output), 32768, 0);
+  if (!length || length >= 32768
+    || !windowsCanonicalPathMatches(path, output.toString("utf16le", 0, length * 2))) throw unsafe();
 }
 
 /** Handle-relative open of one component below an already-pinned parent. */
@@ -354,6 +363,7 @@ function pinChain(ctx: Ctx, absolutePath: string, leafAccess: number): ChainEntr
     const handle = relOpen(ctx, parent, parsed.names[index]!, true, access, SHARE_DIR);
     const inspection = inspect(ctx, handle, true);
     current = join(current, parsed.names[index]!);
+    assertCanonicalPath(ctx, handle, current);
     chain.push({ path: current, handle, inspection });
     parent = handle;
   }
@@ -405,6 +415,7 @@ async function prepareStore(
     await hardenSecretDirAsync(config, { required: true });
     configPrivate = true;
   }
+  assertCanonicalPath(ctx, configPin, config);
   await verifyAcl([{ path: config, directory: true, policy: configPrivate ? "private" : "write-private" }]);
   const jobdirAccess = opts.createJobDir ? ACCESS_DIR_PIN : ACCESS_READ;
   let jobdir: bigint;

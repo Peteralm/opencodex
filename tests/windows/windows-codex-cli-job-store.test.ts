@@ -20,6 +20,7 @@ import { FIXTURE_CONTROL_WORDS, FIXTURE_RELEASE } from "../helpers/cli-update-fi
 import { setWindowsOwnerAclAsyncRunnerForTests, windowsEntriesAclMatches, windowsOwnerAclDefaultRunnerForTests,
   type WindowsAclEntry } from "../../src/lib/windows-owner-acl";
 import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
+import { windowsCanonicalPathMatches } from "../../src/codex/windows-installation-files";
 import { handleCodexCliUpdateRoutes } from "../../src/server/management/codex-cli-update-routes";
 import { handleCodexCliUpdateCommand } from "../../src/cli/codex-cli-update";
 import type { ManagementContext } from "../../src/server/management/context";
@@ -54,6 +55,12 @@ const opaqueAce = (objectType = 5) => `${objectType}|X`;
 describe("windows owner ACL mixed policies", () => {
   const userRun = (entries: readonly { owner: string; flags?: number; aces: readonly string[] }[],
     user = USER_SID, tokenOwner = USER_SID, elevated = false) => aclRun(user, tokenOwner, elevated, entries);
+
+  test("held DOS long-name comparison refuses short aliases and accepts canonical casing", () => {
+    expect(windowsCanonicalPathMatches("C:\\fixture\\LONGPR~1\\ocx", "\\\\?\\C:\\fixture\\LongProfileName\\ocx")).toBe(false);
+    expect(windowsCanonicalPathMatches("c:/fixture/LongProfileName/ocx", "\\\\?\\C:\\FIXTURE\\LongProfileName\\ocx")).toBe(true);
+    expect(windowsCanonicalPathMatches("C:\\fixture\\LongProfileName\\ocx", "C:\\fixture\\LongProfileName\\ocx")).toBe(false);
+  });
 
   test("a foreign read-only grantee passes write-private but an untrusted writer refuses", () => {
     const entries: WindowsAclEntry[] = [{ path: "C:\\cfg", directory: true, policy: "write-private" }];
