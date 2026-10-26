@@ -283,3 +283,5 @@ Claude Code OAuth fingerprint precedent, but should be soak-tested with the
 intended account and workload.
 
 See the [Configuration reference](/reference/configuration/server/#sidecars) for every field.
+
+Long search queries and answers are shortened at complete Unicode character boundaries, so emoji are not split by the result limits.

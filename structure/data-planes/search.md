@@ -57,3 +57,5 @@ routing. Do not infer an exact account from caller-supplied account headers, pro
 selection, connection identity, or other ambient state; concurrent threads could cross-route
 credentials. Extending exact routing to those endpoints requires an opaque client correlation that
 can be bound server-side to a previously validated selector.
+
+Single-result query and answer truncation in `src/web-search/format-result.ts` uses the same surrogate-safe prefix as batched results. The existing UTF-16 limits and truncation markers remain unchanged.
