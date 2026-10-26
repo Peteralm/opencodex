@@ -67,8 +67,10 @@ export function startWindowsCliRecoveryGuardian(native: WindowsChildNative, job:
       const command = wide(args.map(arg => '"' + arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"').join(' '));
       const exe = wide(executable), cwd = wide(temporaryRoot);
       const systemRoot = dirname(dirname(dirname(dirname(executable))));
-      const env = wide(['PATH=' + systemRoot + '\\System32', 'PSModulePath=' + systemRoot + '\\System32\\WindowsPowerShell\\v1.0\\Modules',
-        'SystemRoot=' + systemRoot, 'TEMP=' + temporaryRoot, 'TMP=' + temporaryRoot, 'WINDIR=' + systemRoot].join('\0') + '\0');
+      const env = wide(['APPDATA=' + temporaryRoot, 'HOME=' + temporaryRoot, 'LOCALAPPDATA=' + temporaryRoot,
+        'PATH=' + systemRoot + '\\System32', 'PSModuleAnalysisCachePath=' + temporaryRoot + '\\guardian-module-analysis-cache',
+        'PSModulePath=' + systemRoot + '\\System32\\WindowsPowerShell\\v1.0\\Modules', 'SystemRoot=' + systemRoot,
+        'TEMP=' + temporaryRoot, 'TMP=' + temporaryRoot, 'USERPROFILE=' + temporaryRoot, 'WINDIR=' + systemRoot].join('\0') + '\0');
       const startup = Buffer.alloc(112), info = Buffer.alloc(24);
       startup.writeUInt32LE(112); startup.writeBigUInt64LE(BigInt(ptr(attributes)), 104);
       if (!k.CreateProcessW!(ptr(exe), ptr(command), null, null, 1, 0x08080400, ptr(env), ptr(cwd), ptr(startup), ptr(info))) {

@@ -412,7 +412,8 @@ before primary resume. It inherits only a query-only Job handle and a pre-opened
 it cannot terminate the installer. Only zero Job members permits its flushed terminal proof. This
 proof is also required after restart: name disappearance alone cannot prove descendant termination.
 Observer failure leaves armed evidence fenced. Normal settlement also joins the observer before
-staging cleanup. Access/query failure, missing identity and
+staging cleanup. Its HOME/profile/AppData, compiler temp and PowerShell analysis-cache paths all
+resolve inside that private staging root. Access/query failure, missing identity and
 armed or partial publication remain fenced. Parent admission additionally requires owner-process
 absence; same-process closed-worker recovery first seals its exact generation against another spawn.
 No recovery probe signals an installer. Terminal markers release only the proven token; alias homes

@@ -6,6 +6,10 @@ import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
 import { helperPath } from "../helpers/repo-root";
 import { trackBackgroundWork } from "../../src/lib/background-work";
 import { startWindowsCliChild } from "../../src/codex/windows-cli-child";
+import { startWindowsCliChildWithNative } from "../../src/codex/windows-cli-child";
+import { WindowsChildNative } from "../../src/codex/windows-cli-child-native";
+import { createCodexCliWorkerCommitWindow } from "../../src/codex/cli-update-worker";
+import { read } from "bun:ffi";
 import { prepareRetentionFixture } from "../helpers/windows-cli-apply-retention-fixture";
 import { trustWindowsTempFixtureAncestry } from "../helpers/windows-temp-ancestry";
 import { createCodexCliUpdatePlan } from "../../src/codex/cli-update-plan";
@@ -20,6 +24,48 @@ const native = process.platform === "win32" && process.arch === "x64" ? test : t
 async function until(check: () => boolean, deadline = Date.now() + 30000) {
   while (!check()) { if (Date.now() >= deadline) throw new Error("fixture_handshake_timeout"); await Bun.sleep(10); }
 }
+native("normal guardian settlement isolates profile/cache writes and joins before staging cleanup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-guardian-profile-"));
+  await hardenSecretDirAsync(root, { required: true }); trustWindowsTempFixtureAncestry(root);
+  const f = await prepareRetentionFixture(root); mkdirSync(f.configDir);
+  const before = process.env.OPENCODEX_HOME; process.env.OPENCODEX_HOME = f.configDir;
+  resetCodexCliSelectionGatesForTests();
+  const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence();
+  const window = createCodexCliWorkerCommitWindow({ gate, fence, requestId: crypto.randomUUID(), owner: allocateCodexCliUpdateGateOwner(gate) });
+  let creates = 0, environment: Record<string, string> = {}, staging = "";
+  try {
+    const plan = await createCodexCliUpdatePlan(f.deps); expect(plan.applicable).toBe(true);
+    const result = await applyCodexCliUpdate(plan.planId!, { ...f.deps, commitWindow: window,
+      startWindowsChild(invocation) {
+        staging = invocation.cwd;
+        const native = new WindowsChildNative(), create = native.k.CreateProcessW;
+        native.k.CreateProcessW = (...args) => {
+          if (++creates === 2) {
+            let text = "";
+            for (let i = 0; i < 32768; i++) {
+              const code = read.u16(args[6]!, i * 2);
+              if (!code && text.endsWith("\0")) break; text += String.fromCharCode(code);
+            }
+            environment = Object.fromEntries(text.split("\0").filter(Boolean).map(item => {
+              const separator = item.indexOf("="); return [item.slice(0, separator), item.slice(separator + 1)];
+            }));
+          }
+          return create(...args);
+        };
+        return startWindowsCliChildWithNative({ ...invocation, executable: process.execPath,
+          args: ["-e", "process.exit(0)"], env: { SystemRoot: process.env.SystemRoot, TEMP: root, TMP: root } }, native);
+      },
+    });
+    expect(result).toMatchObject({ outcome: "not_applied", leaseRetained: false, cleanupErrors: [] });
+    expect(creates).toBe(2);
+    for (const name of ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"]) expect(environment[name]).toBe(staging);
+    expect(environment.PSModuleAnalysisCachePath).toBe(join(staging, "guardian-module-analysis-cache"));
+    expect(existsSync(staging)).toBe(false);
+  } finally {
+    resetCodexCliSelectionGatesForTests();
+    if (before === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = before;
+  }
+}, 90000);
 native("a terminal version child with an unconfirmed guardian keeps the bounded reap result", async () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-guardian-reap-"));
   const child = startWindowsCliChild({ executable: process.execPath, args: ["-e", "process.exit(0)"],
