@@ -29,7 +29,7 @@ export function copyPlainData<T>(value: T): PlainDataCopy<T> {
 /**
  * A stable string for comparing two plain-data values.
  *
- * Key-sorted entry pairs rather than objects, because property order is observable through
+ * Tagged containers and key-sorted entry pairs, because property order is observable through
  * serialization and two values that differ only in it are the same value.
  */
 export function canonicalPlainData(value: unknown): string {
@@ -93,11 +93,11 @@ function copyArray(source: unknown[], seen: Set<object>): unknown {
 }
 
 function sorted(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sorted);
+  if (Array.isArray(value)) return ["array", value.map(sorted)];
   if (value !== null && typeof value === "object") {
-    return Object.keys(value as Record<string, unknown>)
+    return ["object", Object.keys(value as Record<string, unknown>)
       .sort()
-      .map(key => [key, sorted((value as Record<string, unknown>)[key])]);
+      .map(key => [key, sorted((value as Record<string, unknown>)[key])])];
   }
   return value;
 }
