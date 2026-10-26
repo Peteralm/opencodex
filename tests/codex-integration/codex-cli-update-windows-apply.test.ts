@@ -1,3 +1,6 @@
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import { tmpdir } from "node:os";
+import { trustWindowsTempFixtureAncestry, windowsTempAncestryPreload } from "../helpers/windows-temp-ancestry";
 import { afterEach, expect, test } from "bun:test";
 import { cpSync, realpathSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, renameSync, symlinkSync, unlinkSync, linkSync } from "node:fs";
 import { join, dirname, parse } from "node:path";
@@ -16,7 +19,7 @@ import { runCodexCliUpdateJobWork } from "../../src/codex/cli-update-job-executi
 import { startWindowsCliChild, type WindowsCliChild } from "../../src/codex/windows-cli-child";
 import { windowsInstallNamespaceSupported } from "../../src/codex/cli-update-windows-observation";
 import { createCodexCliUpdateFence, cancelCodexCliUpdateFence, createWorkerCommitWindow,
-  codexCliUpdateIsCancelled, codexCliUpdateSelectionGate, resetCodexCliSelectionGatesForTests } from "../../src/codex/cli-update-selection-gate";
+  codexCliUpdateIsCancelled, allocateCodexCliUpdateGateOwner, codexCliUpdateSelectionGate, resetCodexCliSelectionGatesForTests } from "../../src/codex/cli-update-selection-gate";
 import { installCodexShim } from "../../src/codex/shim";
 import { clearPersistedCodexRuntime } from "../../src/codex/runtime";
 import { restartCodexDesktopApp } from "../../src/codex/desktop-app-restart";
@@ -25,6 +28,10 @@ import { windowsNpmExecutionArgs } from "../../src/codex/windows-npm-execution";
 import { CodexRemoteWorkspaceRuntimeFactory, RemoteWorkspaceCoordinator } from "../../src/remote-control";
 
 const native = process.platform === "win32" && process.arch === "x64" ? test : test.skip;
+// Full native npm-tree ACL/identity renewal and real children are the proof.
+// Bound this class for a shared Windows host; keep every admission/readback assertion.
+const WINDOWS_APPLY_BUDGET_MS = 4 * SPAWN_BUDGET_MS;
+const WINDOWS_APPLY_CHILD_BUDGET_MS = 2 * SPAWN_BUDGET_MS;
 const roots: string[] = [];
 const liveFixtureRoots = new Set<string>();
 type WorkerFixtureReply = { type: string; requestId?: string; cleanupConfirmed?: boolean; result?: import("../../src/codex/cli-update-apply").CodexCliApplyResult };
@@ -108,9 +115,10 @@ async function fixture(executable?: Buffer, onCreated?: (root: string) => void) 
   // every profile. Evaluate actual ancestry ACL/owner/reparse evidence instead.
   // Create only this test-owned directory below the repository's volume anchor;
   // never repair or suppress metadata on the host's existing ancestor directories.
-  const root = mkdtempSync(join(parse(process.cwd()).root, "ocx-win-apply-"));
+  const root = mkdtempSync(join(tmpdir(), "ocx-win-apply-"));
   onCreated?.(root); roots.push(root);
   await hardenSecretDirAsync(root, { required: true });
+  trustWindowsTempFixtureAncestry(root);
   const prefix = join(root, "prefix"); mkdirSync(prefix);
   await hardenSecretDirAsync(prefix, { required: true });
   const old = artifacts("1.0.0"), target = artifacts("1.1.0", executable);
@@ -185,21 +193,22 @@ native("Windows apply holds distinct prefix lease and private staging, then rele
   expect(existsSync(replacement.lock)).toBe(false);
   liveFixtureRoots.delete(f.root);
   settleOwnership(); // Only fully verified cleanup releases afterEach/preload ownership.
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows paused installer excludes real runtime selection and shim callers through readback", async () => {
   resetCodexCliSelectionGatesForTests();
   const f = await fixture(undefined, root => liveFixtureRoots.add(root)), id = await approved(f);
   const fence = createCodexCliUpdateFence(), gate = codexCliUpdateSelectionGate();
+  const gateOwner = allocateCodexCliUpdateGateOwner(gate);
   const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
   let starts = 0, retained = 0;
   const applying = applyCodexCliUpdate(id, { ...f.deps,
-    commitWindow: createWorkerCommitWindow({ gate, fence }),
+    commitWindow: createWorkerCommitWindow({ gate, fence, owner: gateOwner }),
     retainExecution: () => { retained++; return { release() { retained--; } }; },
     startWindowsChild: invocation => {
       if (invocation.policy === "installer") {
         starts++;
-        expect(Atomics.load(new Int32Array(gate), 0)).toBe(2);
+        expect(Atomics.load(new Int32Array(gate), 0)).toBe(gateOwner);
         expect(Atomics.load(new Int32Array(fence), 0)).toBe(2);
       }
       const child = startWindowsCliChild(invocation);
@@ -231,7 +240,7 @@ native("Windows paused installer excludes real runtime selection and shim caller
   expect(result).toMatchObject({ outcome: "applied", reason: "verified_target", leaseRetained: false });
   expect(starts).toBe(1); expect(retained).toBe(0);
   expect(Atomics.load(new Int32Array(gate), 0)).toBe(0);
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows plan refuses an npm required module writable by Everyone before metadata executes", async () => {
   const f = await fixture();
@@ -243,7 +252,7 @@ native("Windows plan refuses an npm required module writable by Everyone before 
   const plan = await createCodexCliUpdatePlan({ ...f.deps, resolveTarget: () => { executed++; return f.deps.resolveTarget(); } });
   expect(plan.applicable).toBe(false);
   expect(executed).toBe(0);
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows approved plan binds npm library bytes and held authority refuses module replacement", async () => {
   const f = await fixture(), id = await approved(f);
@@ -259,7 +268,7 @@ native("Windows approved plan binds npm library bytes and held authority refuses
   expect(await applyCodexCliUpdate(id, { ...f.deps, install: async () => { starts++; return { terminal: true, exitCode: 0 }; } }))
     .toMatchObject({ outcome: "refused", reason: "plan_changed", leaseRetained: false });
   expect(starts).toBe(0);
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows unknown native installer retains admission until original Job termination proves recovery", async () => {
   resetCodexCliSelectionGatesForTests();
@@ -291,7 +300,7 @@ native("Windows unknown native installer retains admission until original Job te
   expect(Atomics.load(new Int32Array(gate), 0)).toBe(0);
   expect(result.leaseRetained).toBe(true); // Earlier receipt remains honest about its own observation.
   liveFixtureRoots.delete(f.root);
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows npm execution refuses ancestor CommonJS and ESM modules outside its held tree", async () => {
   const f = await fixture(), tools = f.deps.inspectionDeps.env.PATH;
@@ -313,7 +322,7 @@ native("Windows npm execution refuses ancestor CommonJS and ESM modules outside 
     expect(result.exitCode).not.toBe(0);
     expect(existsSync(marker)).toBe(false);
   }
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("a fresh Worker runs real offline Windows FFI install and closes only after native settlement", async () => {
   let root: string | undefined, closed = false, errored = false, worker: Worker | undefined;
@@ -321,13 +330,14 @@ native("a fresh Worker runs real offline Windows FFI install and closes only aft
   try {
     const f = await fixture(undefined, created => { root = created; liveFixtureRoots.add(created); });
     const id = await approved(f);
-    worker = new Worker(new URL("../helpers/windows-apply-worker.ts", import.meta.url), { type: "module" });
+    worker = new Worker(new URL("../helpers/windows-apply-worker.ts", import.meta.url),
+      { type: "module", preload: windowsTempAncestryPreload(f.root) });
     const joined = new Promise<void>((resolve, reject) => {
       worker!.addEventListener("message", event => { messages.push(event.data); });
       worker!.addEventListener("error", () => { errored = true; reject(new Error("offline Worker failed")); }, { once: true });
       worker!.addEventListener("close", () => { closed = true; resolve(); }, { once: true });
     });
-    const gate = new SharedArrayBuffer(4), fence = createCodexCliUpdateFence();
+    const gate = new SharedArrayBuffer(8), fence = createCodexCliUpdateFence();
     worker.postMessage({ requestId, planId: id, inspectionDeps: f.deps.inspectionDeps, target: f.target, gate, fence });
     await joined;
     expect(messages.filter(m => m.type === "native-start")).toHaveLength(1);
@@ -342,18 +352,19 @@ native("a fresh Worker runs real offline Windows FFI install and closes only aft
     // A still-live native Worker keeps its exact fixture; never terminate to fake settlement.
     if (root && fixtureCleanupProven(messages, requestId, closed, errored)) liveFixtureRoots.delete(root);
   }
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows cancellation won inside final synchronous scan cannot create an installer", async () => {
   const f = await fixture(undefined, root => liveFixtureRoots.add(root)), id = await approved(f);
-  const fence = createCodexCliUpdateFence(), gate = new SharedArrayBuffer(4);
+  const fence = createCodexCliUpdateFence(), gate = new SharedArrayBuffer(8);
+  const gateOwner = allocateCodexCliUpdateGateOwner(gate);
   let scans = 0, starts = 0;
   const result = await applyCodexCliUpdate(id, { ...f.deps,
     isCancelled: codexCliUpdateIsCancelled(fence),
-    commitWindow: createWorkerCommitWindow({ gate, fence }),
+    commitWindow: createWorkerCommitWindow({ gate, fence, owner: gateOwner }),
     scanProcesses: () => {
       scans++;
-      if (Atomics.load(new Int32Array(gate), 0) === 2) expect(cancelCodexCliUpdateFence(fence)).toBe(true);
+      if (Atomics.load(new Int32Array(gate), 0) === gateOwner) expect(cancelCodexCliUpdateFence(fence)).toBe(true);
       return { kind: "observed", processes: [] };
     },
     startWindowsChild: invocation => { starts++; return startWindowsCliChild(invocation); },
@@ -363,7 +374,7 @@ native("Windows cancellation won inside final synchronous scan cannot create an 
   expect(result).toMatchObject({ outcome: "refused", reason: "cancelled", leaseRetained: false });
   expect(starts).toBe(0);
   expect(Atomics.load(new Int32Array(gate), 0)).toBe(0);
-}, 60_000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows apply runs real offline npm under owned Job, then verifies full target and version", async () => {
   const f = await fixture(), id = await approved(f);
@@ -371,13 +382,13 @@ native("Windows apply runs real offline npm under owned Job, then verifies full 
   expect(result, JSON.stringify(result)).toMatchObject({ outcome: "applied", reason: "verified_target",
     installerExitCode: 0, installedVersion: "1.1.0", leaseRetained: false, cleanupErrors: [] });
   expect(existsSync(join(f.prefix, ".ocx-codex-cli-apply.lock"))).toBe(false);
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows terminal no-op is not_applied even with nonzero installer exit", async () => {
   const f = await fixture(), id = await approved(f);
   const result = await applyCodexCliUpdate(id, { ...f.deps, install: async () => ({ terminal: true, exitCode: 17 }) });
   expect(result, JSON.stringify(result)).toMatchObject({ outcome: "not_applied", leaseRetained: false, cleanupErrors: [] });
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows pack children and installer descendant share transaction ownership", async () => {
   const f = await fixture(), realNode = join(f.deps.inspectionDeps.env.PATH, "node.exe");
@@ -404,7 +415,7 @@ native("Windows pack children and installer descendant share transaction ownersh
   const result = await applyCodexCliUpdate(id, { ...f.deps, fetchArtifact: undefined });
   expect(result, JSON.stringify(result)).toMatchObject({ outcome: "applied", leaseRetained: false, cleanupErrors: [] });
   expect(readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line))).toEqual(["pack", "pack", "install"]);
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows complete readback outranks a nonzero installer exit", async () => {
   const f = await fixture(), id = await approved(f);
@@ -414,7 +425,7 @@ native("Windows complete readback outranks a nonzero installer exit", async () =
     return { terminal: true, exitCode: 17 };
   } });
   expect(result, JSON.stringify(result)).toMatchObject({ outcome: "applied", installerExitCode: 17, cleanupErrors: [] });
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows cancellation and unknown session observation cannot start an installer", async () => {
   const f = await fixture(), id = await approved(f); let installs = 0;
@@ -429,7 +440,7 @@ native("Windows cancellation and unknown session observation cannot start an ins
     .toBe("blocked_process_state_unknown");
   expect(scans).toBe(3);
   expect(installs).toBe(0);
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native.each(["auxiliary", "shim", "hidden-lock", "extra-file", "new-empty-backing", "selection"] as const)("Windows partial %s refuses not_applied", async kind => {
   const f = await fixture();
@@ -448,7 +459,7 @@ native.each(["auxiliary", "shim", "hidden-lock", "extra-file", "new-empty-backin
     return { terminal: true, exitCode: 1 };
   } });
   expect(result, JSON.stringify(result)).toMatchObject({ outcome: "ambiguous", leaseRetained: false });
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows uncertain installer retains lease and staging until owning process exits", async () => {
   const f = await fixture(), id = await approved(f);
@@ -468,15 +479,16 @@ native("Windows uncertain installer retains lease and staging until owning proce
     'const stage=existsSync(f.prefix+"/.ocx-codex-cli-apply.lock/stage");',
     'writeFileSync(f.receipt,JSON.stringify({result,stage}));',
     'expect(result.outcome).toBe("ambiguous"); expect(result.leaseRetained).toBe(true); expect(stage).toBe(true);',
-    '},60000);',
+    `},${WINDOWS_APPLY_CHILD_BUDGET_MS});`,
   ].join("\n"));
-  const child = await spawnTestChild([process.execPath, "--no-env-file", "--no-install", "test", "--timeout", "60000", entry],
-    { cwd: repoRoot(), env: process.env, deadlineMs: 55000 });
+  const child = await spawnTestChild([process.execPath, "test", "--preload", windowsTempAncestryPreload(f.root),
+    "--no-env-file", "--no-install", "--timeout", String(WINDOWS_APPLY_CHILD_BUDGET_MS), entry],
+    { cwd: repoRoot(), env: process.env, deadlineMs: WINDOWS_APPLY_CHILD_BUDGET_MS + 5000 });
   expect(child.reaped).toBe(true); expect(child.pipesClosed).toBe(true); expect(child.exitCode, child.stderr).toBe(0);
   expect(JSON.parse(readFileSync(receipt, "utf8"))).toMatchObject({ stage: true,
     result: { outcome: "ambiguous", reason: "installer_state_unknown", leaseRetained: true } });
   // The child has exited: only now can the fixture's retained kernel handles be gone.
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows completion persistence retry does not repeat the installer", async () => {
   const f = await fixture(), id = await approved(f); let installs = 0, finishes = 0;
@@ -490,7 +502,7 @@ native("Windows completion persistence retry does not repeat the installer", asy
     }, read: async () => null, release: async () => {},
   });
   expect(installs).toBe(1); expect(finishes).toBe(3);
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows toolchain pins survive an awaited callback; bounded shared prefix is eligible", async () => {
   const f = await fixture();
@@ -511,12 +523,12 @@ native("Windows toolchain pins survive an awaited callback; bounded shared prefi
   const pin = await holdWindowsCodexCliPlanToolchain(refreshed); expect(pin).not.toBeNull(); expect(await pin!.release()).toBe(true);
   mkdirSync(join(f.prefix, "node_modules", "unrelated"));
   expect((await createCodexCliUpdatePlan(f.deps)).applicable).toBe(true);
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows shared prefix preserves unrelated package and shims while executing x64 backing", async () => {
   // Use the existing Windows compiler, with no package install or downloaded binary.
   // This is a CLR x64 executable fixture with actual Win32 Job observation, not vendor Codex.
-  const build = mkdtempSync(join(parse(process.cwd()).root, "ocx-win-apply-")); roots.push(build);
+  const build = mkdtempSync(join(tmpdir(), "ocx-win-apply-")); roots.push(build);
   const source = join(build, "Backing.cs"), exe = join(build, "backing.exe"), trace = join(build, "native.json");
   write(source, [
     'using System; using System.IO; using System.Runtime.InteropServices;',
@@ -557,7 +569,7 @@ native("Windows shared prefix preserves unrelated package and shims while execut
   console.log("owned x64 fixture", JSON.stringify({ backing, jobs: children.map(c => ({ pid: c.pid, start: c.creationTime })) }));
   for (const [path, bytes] of Object.entries(unrelated)) expect(readFileSync(join(f.prefix, path), "utf8")).toBe(bytes);
   expect(existsSync(join(f.prefix, ".ocx-codex-cli-apply.lock"))).toBe(false);
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native.each(["package", "shim", "new-entry"] as const)("Windows shared prefix unexpected %s mutation is ambiguous", async kind => {
   const f = await fixture();
@@ -571,7 +583,7 @@ native.each(["package", "shim", "new-entry"] as const)("Windows shared prefix un
     return { terminal: true, exitCode: 0 };
   } });
   expect(result).toMatchObject({ outcome: "ambiguous", leaseRetained: false });
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows shared namespace still refuses linked unrelated entries", async () => {
   const f = await fixture(), outside = join(f.root, "outside"), alias = join(f.prefix, "node_modules/unrelated");
@@ -583,7 +595,7 @@ native("Windows shared namespace still refuses linked unrelated entries", async 
   linkSync(join(outside, "value"), join(f.prefix, "unrelated.cmd"));
   expect(windowsInstallNamespaceSupported(f.prefix)).toBe(false);
   expect(readFileSync(join(outside, "value"), "utf8")).toBe("must not be followed or changed");
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native.each(["installer", "version"] as const)("Windows %s terminal EOF with native CloseHandle failure retains owner and reports cleanup", async policy => {
   const f = await fixture(), id = await approved(f);
@@ -618,15 +630,16 @@ native.each(["installer", "version"] as const)("Windows %s terminal EOF with nat
     'const stage=existsSync(join(f.prefix,".ocx-codex-cli-apply.lock/stage"));expect(stage).toBe(true);',
     'writeFileSync(f.receipt,JSON.stringify({result,stage,terminal:child.observe().terminal,handles:native.handles.size}));',
     '} finally { if(realClose)native.k.CloseHandle=realClose; for(const h of [...native.handles])native.close(h);expect(native.dispose()).toBe(true); }',
-    '},60000);',
+    `},${WINDOWS_APPLY_CHILD_BUDGET_MS});`,
   ].join("\n"));
-  const result = await spawnTestChild([process.execPath, "--no-env-file", "--no-install", "test", "--timeout", "60000", entry],
-    { cwd: repoRoot(), env: process.env, deadlineMs: 55000 });
+  const result = await spawnTestChild([process.execPath, "test", "--preload", windowsTempAncestryPreload(f.root),
+    "--no-env-file", "--no-install", "--timeout", String(WINDOWS_APPLY_CHILD_BUDGET_MS), entry],
+    { cwd: repoRoot(), env: process.env, deadlineMs: WINDOWS_APPLY_CHILD_BUDGET_MS + 5000 });
   expect(result.reaped && result.pipesClosed).toBe(true); expect(result.exitCode, result.stderr).toBe(0);
   expect(JSON.parse(readFileSync(receipt, "utf8"))).toMatchObject({ terminal: true, handles: 1, stage: true });
   // Retained authority is intentionally not released by production. This isolated
   // owner has exited, so only now may afterEach remove its private fixture prefix.
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);
 
 native("Windows shared prefix terminal no-op preserves full observed original", async () => {
   const f = await fixture();
@@ -635,4 +648,4 @@ native("Windows shared prefix terminal no-op preserves full observed original", 
   const id = await approved(f);
   const result = await applyCodexCliUpdate(id, { ...f.deps, install: async () => ({ terminal: true, exitCode: 0 }) });
   expect(result).toMatchObject({ outcome: "not_applied", reason: "original_install_unchanged", leaseRetained: false, cleanupErrors: [] });
-}, 60000);
+}, WINDOWS_APPLY_BUDGET_MS);

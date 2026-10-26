@@ -1,4 +1,5 @@
 import { writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 import type { CodexCliApplyDeps, CodexCliApplyResult, CodexCliApplyCleanupError } from "./cli-update-apply";
 import { createCodexCliUpdatePlan, createNpmConfigIsolation } from "./cli-update-plan";
@@ -85,7 +86,13 @@ export async function applyWindowsCodexCliUpdate(planId: string, deps: CodexCliA
   const startOwned = (invocation: WindowsCliChildInvocation): WindowsCliChild => {
     if (!owner || owner.child) throw new Error("child_cleanup_pending");
     uncertain = true; // A throwing start may already have created native resources.
-    return owner.child = (deps.startWindowsChild ?? startWindowsCliChild)(invocation);
+    const jobName = installerStarted ? `Global\\ocx-cli-${randomUUID()}` : undefined;
+    const proof = jobName ? deps.commitWindow?.childStarting?.(jobName) : undefined;
+    const child = owner.child = (deps.startWindowsChild ?? startWindowsCliChild)({ ...invocation,
+      recoveryJobName: jobName, recoveryProof: proof || undefined });
+    if (jobName && child.pid && child.creationTime) deps.commitWindow?.childStarted?.(child.pid,
+      { jobName, creationTime: child.creationTime });
+    return child;
   };
   const run = async (invocation: WindowsCliChildInvocation): Promise<WindowsCliChildResult> => {
     if (!owner) throw new Error("ownership_required");

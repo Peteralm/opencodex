@@ -1185,7 +1185,7 @@ printf '%s\\n' child-codex
           });
           if (callerToken === undefined) delete env.OPENCODEX_API_AUTH_TOKEN;
           const result = shell === "cmd"
-            ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", "driver.cmd"], { cwd: dir, env, encoding: "utf8", timeout: SHELL_SPAWN_TIMEOUT_MS, windowsHide: true })
+            ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", ".\\driver.cmd"], { cwd: dir, env, encoding: "utf8", timeout: SHELL_SPAWN_TIMEOUT_MS, windowsHide: true })
             : spawnSync(`${shell}.exe`, ["-NoProfile", "-NonInteractive", "-File", driverPath], { env, encoding: "utf8", timeout: SHELL_SPAWN_TIMEOUT_MS, windowsHide: true });
           expect(result.status, result.stderr).toBe(0);
           expect(result.stdout.trim().split(/\r?\n/)).toEqual([

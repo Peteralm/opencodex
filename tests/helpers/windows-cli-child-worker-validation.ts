@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { trustWindowsTempFixtureAncestry } from "./windows-temp-ancestry";
 /** A3/A4 owned native fixtures. No application, npm installer, or production recovery API. */
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, parse } from "node:path";
@@ -130,7 +132,7 @@ function adoptPipe(pipe: WindowsChildPipe) {
 async function run(ids: Ids) {
   own.ids = ids;
   need(process.platform === "win32" && process.arch === "x64", "WINDOWS_X64_REQUIRED");
-  own.root = mkdtempSync(join(parse(process.cwd()).root, "ocx-native-worker-"));
+  own.root = mkdtempSync(join(tmpdir(), "ocx-native-worker-"));
   own.gate = join(own.root, "descendant-release");
   emit("started", { fixtureRoot: own.root, caseName: ids.caseId === "A3" ? "native Job unknown observation" : "overlapped cancellation settlement" });
   const token = lifetime.retain(own); own.tokenCount++;

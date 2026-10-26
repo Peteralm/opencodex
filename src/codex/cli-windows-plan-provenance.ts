@@ -6,14 +6,32 @@ import { MAX_NATIVE_BACKING_BYTES } from "./cli-installation-limits";
 import { deriveCodexCliInstallationInput } from "./cli-installation-targets";
 import type { CodexCliInstallProvenanceDeps, CodexCliInstallReport } from "./cli-install-provenance";
 import { resolveCodexRuntime } from "./runtime";
-import { inspectWindowsInstallationFiles, type WindowsInstallationFilesResult } from "./windows-installation-files";
+import { inspectWindowsInstallationFiles as inspectFiles, type WindowsInstallationFilesResult } from "./windows-installation-files";
+
+// Every plan observation refuses alternate names, including aliases of ancestors.
+const inspectWindowsInstallationFiles: typeof inspectFiles = (requests, finalize) =>
+  inspectFiles(requests.map(request => ({ ...request, requireCanonicalPath: true })), finalize);
+
+async function withCanonicalExclusionRoots<R>(roots: readonly string[], run: () => Promise<R>): Promise<R | null> {
+  if (!roots.length) return run();
+  let result: R | null = null;
+  // Keep every exclusion open across the observation/query; validate each batch
+  // under the native reader's existing request ceiling without dropping a root.
+  const observed = await inspectWindowsInstallationFiles(roots.slice(0, 12).map(path => ({
+    path: win32.normalize(path), maxBytes: 0, metadataOnly: true, directory: true,
+  })), async () => {
+    result = await withCanonicalExclusionRoots(roots.slice(12), run); return result !== null;
+  });
+  return observed.kind === "observed" ? result : null;
+}
+
 import { openWindowsCliToolchainAuthority, WindowsCliToolchainCleanupError } from "./cli-update-job-store-windows";
 
 /** Private plan evidence. Explicit `attest` observations never enter this map. */
 interface WindowsPlanEvidence { readonly node: string; readonly npmCli: string; readonly arch: "x64" | "arm64";
   readonly prefix: string; readonly launcher: string; readonly backingRoot: string;
   readonly envPath: string | undefined; readonly envPathExt: string | undefined;
-  readonly nodeEvidence: string; readonly npmEvidence: string }
+  readonly nodeEvidence: string; readonly npmEvidence: string; readonly exclusionRoots: readonly string[] }
 const evidence = new WeakMap<CodexCliInstallReport, WindowsPlanEvidence>();
 const toolchainDigests = new WeakMap<CodexCliInstallReport, string>();
 export const windowsCodexCliToolchainDigest = (report: CodexCliInstallReport): string | undefined => toolchainDigests.get(report);
@@ -40,6 +58,7 @@ export async function withWindowsCodexCliPlanToolchain<R>(report: CodexCliInstal
   run: () => R): Promise<Awaited<R> | null> {
   const toolchain = evidence.get(report);
   if (!toolchain) return null;
+  return withCanonicalExclusionRoots(toolchain.exclusionRoots, async () => {
   let authority;
   try { authority = await openWindowsCliToolchainAuthority(toolchain.node, win32.dirname(win32.dirname(toolchain.npmCli)), true); }
   catch (error) { if (error instanceof WindowsCliToolchainCleanupError) throw error; return null; }
@@ -54,6 +73,7 @@ export async function withWindowsCodexCliPlanToolchain<R>(report: CodexCliInstal
   });
   return observed.kind === "observed" ? result : null;
   } finally { if (!await authority.release()) throw new Error("toolchain_release_unverified"); }
+  });
 }
 
 /** Transfer a held toolchain observation to a transaction, including unknown child lifetimes. */
@@ -65,7 +85,7 @@ export async function holdWindowsCodexCliPlanToolchain(report: CodexCliInstallRe
   catch (error) { if (error instanceof WindowsCliToolchainCleanupError) throw error; return null; }
   const admitted = Promise.withResolvers<boolean>();
   const release = Promise.withResolvers<void>();
-  const observing = inspectWindowsInstallationFiles([
+  const observing = withCanonicalExclusionRoots(toolchain.exclusionRoots, () => inspectWindowsInstallationFiles([
     { path: toolchain.node, maxBytes: 128 * 1024 * 1024, hashOnly: true },
     { path: toolchain.npmCli, maxBytes: 256 * 1024 },
   ], async files => {
@@ -73,11 +93,11 @@ export async function holdWindowsCodexCliPlanToolchain(report: CodexCliInstallRe
     admitted.resolve(true);
     await release.promise;
     return true;
-  });
+  }));
   void observing.then(() => admitted.resolve(false), () => admitted.resolve(false));
   if (!await admitted.promise) { await authority.release(); return null; }
   return { async release() { release.resolve(); const observed = await observing;
-    return await authority.release() && observed.kind === "observed"; } };
+    return await authority.release() && observed?.kind === "observed"; } };
 }
 const json = (file: File): Record<string, unknown> | null => {
   try { const item = JSON.parse(Buffer.from(file.bytes).toString("utf8"));
@@ -107,15 +127,26 @@ function peArch(bytes: Uint8Array): "x64" | "arm64" | null {
  */
 export async function inspectWindowsCodexCliPlanInstall(
   deps: CodexCliInstallProvenanceDeps, fallback: CodexCliInstallReport, excluded: (path: string) => boolean,
+  exclusionRoots: readonly string[] = [],
 ): Promise<CodexCliInstallReport> {
   const env = deps.env ?? {};
-  // The bounded content read is opt-in: a bare ownership check holds the same
-  // reparse-refusing handles and identity set but streams no file content.
-  const observe = deps.observeInstallContent === true;
   const candidate = env.CODEX_CLI_PATH?.trim();
   if (!deps.selectionAttested || !candidate || !/^[a-z]:[\\/]/i.test(candidate)
     || win32.basename(candidate) !== "codex.cmd"
     || (deps.selectedCommand != null && deps.selectedCommand !== candidate)) return fallback;
+  if (exclusionRoots.length) {
+    const roots = Object.freeze([...exclusionRoots]);
+    const report = await withCanonicalExclusionRoots(roots,
+      () => inspectWindowsCodexCliPlanInstall(deps, fallback, excluded));
+    if (report) {
+      const toolchain = evidence.get(report);
+      if (toolchain) evidence.set(report, Object.freeze({ ...toolchain, exclusionRoots: roots }));
+    }
+    return report ?? fallback;
+  }
+  // The bounded content read is opt-in: a bare ownership check holds the same
+  // reparse-refusing handles; only bounded ownership/header reads remain.
+  const observe = deps.observeInstallContent === true;
   const prefix = win32.dirname(candidate);
   const localNodePath = win32.join(prefix, "node.exe");
   const localNode = await inspectWindowsInstallationFiles([{ path: localNodePath, maxBytes: 0, metadataOnly: true }]);
@@ -213,7 +244,7 @@ export async function inspectWindowsCodexCliPlanInstall(
     });
     evidence.set(report, Object.freeze({ node, npmCli, arch, prefix, launcher: candidate,
       envPath: selectedPath, envPathExt: selectedPathExt,
-      backingRoot: win32.dirname(backingManifest), nodeEvidence: id(files.get(node)!), npmEvidence: id(files.get(npmCli)!) }));
+      backingRoot: win32.dirname(backingManifest), nodeEvidence: id(files.get(node)!), npmEvidence: id(files.get(npmCli)!), exclusionRoots: Object.freeze([]) }));
     return report;
   } catch { return fallback; }
 }

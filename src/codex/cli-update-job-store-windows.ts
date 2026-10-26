@@ -58,15 +58,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { Library, Symbols } from "bun:ffi";
-import { getConfigDir } from "../config";
+import * as recoveryFfi from "bun:ffi";
+import { getConfigDir } from "../config/paths";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
-import { forgetEphemeralSecretPath, hardenSecretDirAsync, hardenSecretPathAsync } from "../lib/windows-secret-acl";
-import { verifyWindowsEntriesAclAsync, type WindowsAclEntry } from "../lib/windows-owner-acl";
+import { forgetEphemeralSecretPath, hardenSecretDir, hardenSecretPath, hardenSecretDirAsync, hardenSecretPathAsync } from "../lib/windows-secret-acl";
+import { verifyWindowsEntriesAcl, verifyWindowsEntriesAclAsync, type WindowsAclEntry } from "../lib/windows-owner-acl";
 import { retryWindowsFileOperation } from "../lib/windows-atomic-replace";
 import {
   CODEX_CLI_JOB_STORE_DIR, CODEX_CLI_JOB_STORE_FILE, CODEX_CLI_JOB_STORE_LOCK,
   CODEX_CLI_JOB_STORE_MAX_BYTES, CodexCliJobStoreBusyError,
 } from "./cli-update-job-execution";
+import { windowsCanonicalPathMatches } from "./windows-installation-files";
 
 const KERNEL_SYMBOLS = {
   GetDriveTypeW: { args: ["ptr"], returns: "u32" },
@@ -259,6 +261,13 @@ function sameIdentity(a: StoreIdentity, b: StoreIdentity): boolean {
   return a.volumeSerial === b.volumeSerial && a.fileId === b.fileId;
 }
 
+function assertCanonicalPath(ctx: Ctx, handle: bigint, path: string): void {
+  const output = Buffer.alloc(32768 * 2);
+  const length = ctx.kernel.symbols.GetFinalPathNameByHandleW!(handle, ctx.ffi.ptr(output), 32768, 0);
+  if (!length || length >= 32768
+    || !windowsCanonicalPathMatches(path, output.toString("utf16le", 0, length * 2))) throw unsafe();
+}
+
 /** Handle-relative open of one component below an already-pinned parent. */
 function relOpen(
   ctx: Ctx,
@@ -404,6 +413,7 @@ function pinChain(ctx: Ctx, absolutePath: string, leafAccess: number): ChainEntr
     const handle = relOpen(ctx, parent, parsed.names[index]!, true, access, SHARE_DIR);
     const inspection = inspect(ctx, handle, true);
     current = join(current, parsed.names[index]!);
+    assertCanonicalPath(ctx, handle, current);
     chain.push({ path: current, handle, inspection });
     parent = handle;
   }
@@ -455,6 +465,7 @@ async function prepareStore(
     await hardenSecretDirAsync(config, { required: true });
     configPrivate = true;
   }
+  assertCanonicalPath(ctx, configPin, config);
   await verifyAcl([{ path: config, directory: true, policy: configPrivate ? "private" : "write-private" }]);
   const jobdirAccess = opts.createJobDir ? ACCESS_DIR_PIN : ACCESS_READ;
   let jobdir: bigint;
@@ -510,6 +521,8 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
   const tempName = ".jobs-" + randomUUID() + ".tmp";
   const temp = join(prepared.dir, tempName);
   let leaf: bigint | undefined;
+  let tempIdentity: StoreIdentity | undefined;
+  let publishedName = false;
   try {
     const fd = openSync(temp, "wx", 0o600);
     try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
@@ -517,9 +530,11 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
     const stat = inspect(ctx, leaf, false);
     if (stat.links !== 1 || stat.size !== bytes) throw unsafe();
     if (!readAll(ctx, leaf, stat.size).equals(Buffer.from(body))) throw unsafe();
+    tempIdentity = stat;
     await hardenSecretPathAsync(temp, { required: true, timeoutMemoKey: prepared.file });
     await verifyAcl([{ path: temp, directory: false, policy: "private" }]);
     renamePinned(ctx, leaf, prepared.file);
+    publishedName = true;
     // The held handle now names jobs.json. A fresh name-open proves the published
     // path resolves to the identical object while the original handle is still held.
     let published: bigint | undefined;
@@ -537,7 +552,15 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
     }
     flushDir(ctx, prepared.jobdir);
   } finally {
-    try { unlinkSync(temp); } catch { /* already renamed or never created */ }
+    // A published leaf is jobs.json even if readback/flush subsequently fails.
+    // Only the verified unpublished object may be marked for delete-on-close.
+    if (!publishedName) {
+      try {
+        if (leaf !== undefined && tempIdentity !== undefined) {
+          if (sameIdentity(inspect(ctx, leaf, false), tempIdentity)) markDelete(ctx, leaf);
+        } else if (leaf === undefined) unlinkSync(temp);
+      } catch { /* unprovable cleanup stays fail-closed */ }
+    }
     forgetEphemeralSecretPath(temp);
     if (leaf !== undefined) ctx.pins.release(leaf, ctx.kernel);
   }
@@ -642,6 +665,87 @@ function releaseLock(ctx: Ctx, held: HeldLock): void {
     if (sameIdentity(inspect(ctx, held.dir, true), held.dirIdentity)) markDelete(ctx, held.dir);
   } catch { /* fail closed; a leftover lock blocks later admission */ }
   ctx.pins.release(held.dir, ctx.kernel);
+}
+
+export interface WindowsCliRecoveryIo {
+  readonly dir: string;
+  names(): string[];
+  read(name: string): string;
+  withProofHandle<T>(name: string, run: (handle: bigint) => T): T;
+  write(name: string, pendingName: string, body: string): void;
+}
+/** The shared recovery protocol uses the ledger's native ancestry, no-reparse,
+ * identity, private-DACL and rename primitives at synchronous gate boundaries.
+ * Only this process's exact token may replace its bounded pending publication.
+ */
+export function withWindowsCliRecoveryStore<T>(config: string, create: boolean, run: (io: WindowsCliRecoveryIo) => T): T {
+  if (process.platform !== "win32" || process.arch !== "x64") throw unsafe();
+  assertNotRealHomeUnderTest(config);
+  const kernel = recoveryFfi.dlopen("kernel32.dll", KERNEL_SYMBOLS);
+  const nt = recoveryFfi.dlopen("ntdll.dll", NT_SYMBOLS);
+  const ctx: Ctx = { ffi: recoveryFfi, kernel, nt, pins: new PinSet() };
+  const verify = (entries: readonly WindowsAclEntry[]) => {
+    if (!verifyWindowsEntriesAcl(entries, ACL_VERIFY_TIMEOUT_MS)) throw unsafe();
+  };
+  try {
+    const chain = pinChain(ctx, config, ACCESS_DIR_PIN);
+    verify(chain.map((entry, i) => ({ path: entry.path, directory: true,
+      policy: i >= chain.length - 2 ? "write-private" : "trusted-ancestry" })));
+    const configPin = chain.at(-1);
+    if (!configPin) throw unsafe();
+    const dir = join(config, "codex-cli-update-recovery");
+    try {
+      if (create) { mkdirSync(dir); hardenSecretDir(dir, { required: true }); }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const directoryPin = relOpen(ctx, configPin.handle, "codex-cli-update-recovery", true,
+      create ? ACCESS_DIR_PIN : ACCESS_READ, SHARE_DIR);
+    inspect(ctx, directoryPin, true); assertCanonicalPath(ctx, directoryPin, dir);
+    verify([{ path: dir, directory: true, policy: "private" }]);
+    if (create) flushDir(ctx, configPin.handle);
+    const leaf = (name: string, access = ACCESS_READ, sharing = SHARE_LEAF_VERIFY) => {
+      if (!/^[0-9a-f-]{36}(?:\.(?:terminal|proof))?(?:\.pending|\.json|\.terminal|\.proof)$/.test(name)) throw unsafe();
+      const handle = relOpen(ctx, directoryPin, name, false, access, sharing);
+      const stat = inspect(ctx, handle, false);
+      if (stat.links !== 1 || stat.size > 1024) throw unsafe();
+      verify([{ path: join(dir, name), directory: false, policy: "private" }]);
+      return { handle, stat };
+    };
+    return run({ dir,
+      names: () => readdirSync(dir),
+      read(name) {
+        const file = leaf(name);
+        try { return readAll(ctx, file.handle, file.stat.size).toString("utf8"); }
+        finally { ctx.pins.release(file.handle, kernel); }
+      },
+      withProofHandle(name, use) {
+        if (!/^[0-9a-f-]{36}\.proof$/.test(name)) throw unsafe();
+        const file = leaf(name, 0x40100080, 7);
+        try { return use(file.handle); } finally { ctx.pins.release(file.handle, kernel); }
+      },
+      write(name, pendingName, body) {
+        if (!create || Buffer.byteLength(body) > 1024 || !/^[0-9a-f-]{36}(?:\.terminal|\.proof)?$/.test(name.replace(/\.json$/, ""))
+          || pendingName !== name.replace(/\.json$/, "") + ".pending") throw unsafe();
+        // A previous failed publication is removed only through its verified pin.
+        try {
+          const old = leaf(pendingName, ACCESS_LEAF, SHARE_LEAF);
+          markDelete(ctx, old.handle); ctx.pins.release(old.handle, kernel);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const temp = join(dir, pendingName), destination = join(dir, name);
+        const fd = openSync(temp, "wx", 0o600);
+        try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
+        hardenSecretPath(temp, { required: true });
+        const file = leaf(pendingName, ACCESS_LEAF, SHARE_LEAF);
+        try {
+          if (!readAll(ctx, file.handle, file.stat.size).equals(Buffer.from(body))) throw unsafe();
+          renamePinned(ctx, file.handle, destination);
+          const published = leaf(name);
+          try { if (!sameIdentity(file.stat, published.stat)) throw unsafe(); }
+          finally { ctx.pins.release(published.handle, kernel); }
+          flushDir(ctx, directoryPin);
+        } finally { ctx.pins.release(file.handle, kernel); forgetEphemeralSecretPath(temp); }
+      },
+    });
+  } finally { ctx.pins.closeAll(kernel); nt.close(); kernel.close(); }
 }
 
 export interface WindowsJobStoreIo {

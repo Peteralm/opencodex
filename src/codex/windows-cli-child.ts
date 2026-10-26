@@ -2,6 +2,8 @@ import { win32 } from "node:path";
 import { ptr } from "bun:ffi";
 import { securityAttributes, wide, WIN64_CHILD_ABI, WindowsChildNative } from "./windows-cli-child-native";
 import { WindowsChildPipe } from "./windows-cli-child-pipe";
+import { startWindowsCliRecoveryGuardian } from "./windows-cli-recovery-guardian";
+import type { CodexCliUpdateNativeRecoveryProof } from "./cli-update-recovery";
 
 export type WindowsCliChildPolicy = "installer" | "pack" | "version";
 export function windowsCliChildPolicy(policy: WindowsCliChildPolicy) {
@@ -17,6 +19,9 @@ export interface WindowsCliChildInvocation {
   readonly cwd: string;
   readonly env: Readonly<NodeJS.ProcessEnv>;
   readonly policy: WindowsCliChildPolicy;
+  /** Private durable recovery identity, selected before native creation. */
+  readonly recoveryJobName?: string;
+  readonly recoveryProof?: CodexCliUpdateNativeRecoveryProof;
 }
 export interface WindowsCliChildResult {
   readonly terminal: boolean;
@@ -38,7 +43,8 @@ function validate(invocation: WindowsCliChildInvocation): void {
   if (!localAbsolute(invocation.executable) || !/\.exe$/i.test(invocation.executable)
     || !localAbsolute(invocation.cwd) || !Array.isArray(invocation.args)
     || invocation.args.some(arg => typeof arg !== "string" || arg.includes("\0"))
-    || !windowsCliChildPolicy(invocation.policy)) throw new Error("windows_child_invalid_invocation");
+    || !windowsCliChildPolicy(invocation.policy)
+    || (invocation.recoveryJobName !== undefined && !/^Global\\ocx-cli-[0-9a-f-]{36}$/.test(invocation.recoveryJobName))) throw new Error("windows_child_invalid_invocation");
 }
 function environmentBlock(env: Readonly<NodeJS.ProcessEnv>, native: WindowsChildNative): Buffer {
   const entries = Object.keys(env).filter(key => env[key] !== undefined).map(key => {
@@ -72,6 +78,7 @@ export class WindowsCliChild {
   creationTime: string | null = null;
   process = 0n;
   job = 0n;
+  recoveryGuardian = 0n;
   setupFailure: string | null = null;
   private stopAt: number | null = null;
   private terminationFailed = false;
@@ -132,6 +139,18 @@ export class WindowsCliChild {
         if (this.pipe.error) { this.fail("pipe_read_failed"); if (this.policy.terminate) this.stop("pipe_read_failed"); }
         const observed = this.observe();
         if (observed.terminal && this.pipe.eof) {
+          if (this.recoveryGuardian) {
+            const wait = Number(this.native.k.WaitForSingleObject!(this.recoveryGuardian, 0));
+            if (wait === 258) {
+              if (this.policy.deadlineMs !== null && performance.now() - this.clockStartedAt
+                >= this.policy.deadlineMs + this.policy.reapMs!) {
+                this.fail("recovery_observer_state_unknown"); return this.result(false, null);
+              }
+              await Bun.sleep(5); continue;
+            }
+            if (wait !== 0) { this.fail("recovery_observer_wait_failed"); return this.result(false, null); }
+            this.native.close(this.recoveryGuardian);
+          }
           await this.pipe.dispose();
           this.native.close(this.process); this.native.close(this.job);
           const released = this.native.dispose();
@@ -166,7 +185,16 @@ export function startWindowsCliChildWithNative(invocation: WindowsCliChildInvoca
   let stdin = 0n, stderr = 0n, thread = 0n, attributes: Buffer | undefined, initialized = false;
   let inheritedHandles: Buffer | undefined;
   try {
-    child.job = native.keep(k.CreateJobObjectW!(null, null));
+    if (invocation.recoveryJobName) {
+      const name = wide(invocation.recoveryJobName), descriptor = native.privateDescriptor();
+      try {
+        const security = securityAttributes(false, descriptor);
+        k.SetLastError!(0);
+        child.job = native.keep(k.CreateJobObjectW!(ptr(security), ptr(name)));
+        // Never adopt a pre-existing object, even inside the current-user boundary.
+        if (k.GetLastError!() === 183) throw new Error("windows_child_job_exists");
+      } finally { k.LocalFree!(descriptor); }
+    } else child.job = native.keep(k.CreateJobObjectW!(null, null));
     child.pipe.open();
     const inheritable = securityAttributes(true), nul = wide("NUL");
     stdin = native.keep(k.CreateFileW!(ptr(nul), 0x80000000, 3, ptr(inheritable), 3, 0, 0n));
@@ -203,6 +231,7 @@ export function startWindowsCliChildWithNative(invocation: WindowsCliChildInvoca
     child.creationTime = creation.readBigUInt64LE().toString();
     if (child.creationTime === "0") throw new Error("process_creation_time_unknown");
     if (!k.AssignProcessToJobObject!(child.job, child.process)) throw new Error("job_assignment");
+    if (invocation.recoveryProof) child.recoveryGuardian = startWindowsCliRecoveryGuardian(native, child.job, invocation.recoveryProof, invocation.cwd);
     if (Number(k.ResumeThread!(thread)) !== 1) throw new Error("resume_thread");
   } catch (error) {
     child.setupFailure = error instanceof Error ? error.message : "setup_failed";

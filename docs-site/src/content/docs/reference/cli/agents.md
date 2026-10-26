@@ -1164,12 +1164,11 @@ can then establish `managed: true` when it proves ownership and, if a candidate 
 and `selectionAttested`. Inspecting the configured candidate requires a trusted published-launcher context;
 a direct Bun/source launch has no such proof, ignores ambient and persisted candidate state, and may report
 `candidate_unavailable` on POSIX. On Windows x64, a proof-captured absolute standard npm `codex.cmd`
-can be managed when held local handles bind its package, a held-bound Node/npm toolchain — prefix-local
-when present, otherwise the captured-PATH pair anchored to the launcher architecture — and the first
-in-prefix platform backing. Other Windows layouts remain deferred or unmanaged. A `managed` Windows result classifies
-the observed installation layout only: the bound Node/npm is the updater's read-only metadata toolchain, never a claim
-about which interpreter a later `codex.cmd` invocation resolves, while inspection and planning stay read-only; applicability and confirmed apply are decided separately.
-Windows never consults persisted state, so a run
+can be managed when held local handles bind its package, a prefix-local Node/npm pair or the captured
+PATH metadata pair tied to the launcher architecture, and the first in-prefix platform backing.
+This metadata pair does not attest the interpreter a later CMD invocation would select.
+Plan paths and configured version-manager roots must use their canonical long DOS names;
+aliases, unavailable roots and reparse points leave the installation unmanaged. Other Windows layouts remain deferred or unmanaged. Windows never consults persisted state, so a run
 with no captured environment candidate reports `windows_inspection_deferred` rather than `candidate_unavailable`:
 the command cannot observe whether a Codex CLI is installed, so it reports the deferral instead of asserting
 that no candidate exists. The command does not execute Codex or a package manager, repair a shim,
@@ -1224,6 +1223,26 @@ and other installation managers remain unsupported. Unknown child lifetime or in
 the installation lease; do not retry by deleting its lock. Readback includes auxiliary files,
 new/absent backing roots and npm's hidden lockfile. `not_applied` means scoped installation state
 was observed unchanged, not that npm performed no I/O anywhere.
+Installation directories and staging require trusted POSIX ownership and permissions throughout their
+ancestry. Unsafe installation paths report `installation_prefix_unsupported` or
+`installation_paths_untrusted`; unsafe temporary roots report `staging_path_untrusted`. Use a private
+temporary directory below trusted ancestors (root-owned sticky temporary roots are supported).
+Owned session starts, desktop restarts and runtime/shim selection changes report busy while installation
+and readback run. An unconfirmed installer or verification child keeps admission closed. Admission
+recovers when the owned process group is proven gone, including a verification child that closes after
+its reap deadline. Worker loss before commit also restores admission; worker close after commit alone
+does not. Durable recovery records preserve this exclusion across proxy restarts.
+On Windows, recovery checks the exact installer/verifier Job and original process creation identity;
+all Job members must have exited. Access failures keep admission closed and never stop an installer.
+Missing child identity, partial records or inaccessible liveness evidence require inspection. A complete terminal write left
+before its publication rename can restore admission after restart when its exact owner and current
+parent/group absence are verified; incomplete or armed pending writes still require inspection.
+Recovery does not change an
+ambiguous job result, retry installation or reclaim an abandoned installation lease.
+Without recovery history, a symlinked `OPENCODEX_HOME` (or home ancestor) permits these ordinary
+operations. With history, admission reads the protected canonical home target; unsafe recovery
+paths still report busy. This does not relax the updater's installation or config-path eligibility.
+Shim repair, native apps and other installation managers remain unsupported.
 
 Apply exits 0 only for an `applied` job; `not_applied`, `refused`, `ambiguous` and pending duplicate jobs
 exit 1, including with `--json`. Status reads the

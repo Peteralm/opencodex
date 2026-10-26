@@ -7,7 +7,7 @@
  * operations have their own regression cases elsewhere.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CodexCliApplyDeps } from "../../src/codex/cli-update-apply";
@@ -21,8 +21,11 @@ import {
   createCodexCliUpdateFence, cancelCodexCliUpdateFence, codexCliUpdateIsCancelled,
   codexCliUpdateSelectionGate, beginCodexCliSelectionParentWrite,
   createWorkerCommitWindow, resetCodexCliSelectionGatesForTests,
-  reserveCodexCliInstallationGeneration, recoverCodexCliInstallationAfterWorkerClose,
+  allocateCodexCliUpdateGateOwner,
 } from "../../src/codex/cli-update-selection-gate";
+import { recoverClosedCodexCliUpdateWorker } from "../../src/codex/cli-update-worker-recovery";
+import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
+import { trustWindowsTempFixtureAncestry } from "../helpers/windows-temp-ancestry";
 import { codexCliUpdateInspectionDepsFromSnapshot } from "../../src/codex/cli-update-inspection-context";
 import { removeTreeAfterBackgroundWork } from "../helpers/remove-tree";
 import { spawnTestChild } from "../helpers/spawn-test-child";
@@ -173,20 +176,29 @@ afterEach(async () => {
   if (firstError !== undefined) throw firstError;
 });
 describe("process-wide selection commit gate and cancellation fence", () => {
-  test("only the dead pre-spawn owner's generation can recover installation admission", () => {
+  test("only the dead pre-spawn owner's generation can recover installation admission", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-generation-close-")), configDir = join(root, "config");
+    roots.push(root); mkdirSync(configDir, { mode: 0o700 });
+    if (process.platform === "win32") {
+      await hardenSecretDirAsync(root, { required: true });
+      await hardenSecretDirAsync(configDir, { required: true }); trustWindowsTempFixtureAncestry(root);
+    }
     const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence();
-    const generation = reserveCodexCliInstallationGeneration(gate);
-    const old = createWorkerCommitWindow({ gate, fence, generation });
+    const generation = allocateCodexCliUpdateGateOwner(gate);
+    const old = createWorkerCommitWindow({ gate, fence, owner: generation });
     expect(old.tryEnter()).toBe(true);
-    expect(recoverCodexCliInstallationAfterWorkerClose(gate, fence, generation + 1)).toBe(false);
-    expect(recoverCodexCliInstallationAfterWorkerClose(gate, fence, generation)).toBe(true);
+    recoverClosedCodexCliUpdateWorker(gate, createCodexCliUpdateFence(), generation + 1, crypto.randomUUID(), configDir);
+    expect(Atomics.load(new Int32Array(gate), 0)).toBe(generation);
+    recoverClosedCodexCliUpdateWorker(gate, fence, generation, crypto.randomUUID(), configDir);
+    expect(old.commit()).toBe(false);
     const nextFence = createCodexCliUpdateFence();
     const next = createWorkerCommitWindow({ gate, fence: nextFence });
     expect(next.tryEnter()).toBe(true);
     old.exit(); // A stale worker cannot release the new installation owner.
     expect(beginCodexCliSelectionParentWrite().entered).toBe(false);
     expect(next.commit()).toBe(true);
-    expect(recoverCodexCliInstallationAfterWorkerClose(gate, nextFence, new Int32Array(gate)[1]!)).toBe(false);
+    recoverClosedCodexCliUpdateWorker(gate, nextFence, Atomics.load(new Int32Array(gate), 0), crypto.randomUUID(), configDir);
+    expect(beginCodexCliSelectionParentWrite().entered).toBe(false);
     next.exit(); // Native terminal + readback path owns release after COMMITTED.
     const writer = beginCodexCliSelectionParentWrite();
     expect(writer.entered).toBe(true); writer.exit();

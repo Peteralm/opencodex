@@ -94,7 +94,7 @@ async function apply(message: CodexCliUpdateWorkerRunMessage) {
   const gate = new Int32Array(message.gate), fence = new Int32Array(message.fence);
   try { result = await applyCodexCliUpdate(planId, { ...fixture.deps, signal: abort.signal,
     isCancelled: codexCliUpdateIsCancelled(message.fence),
-    commitWindow: createWorkerCommitWindow({ gate: message.gate, fence: message.fence }),
+    commitWindow: createWorkerCommitWindow({ gate: message.gate, fence: message.fence, owner: message.owner }),
     retainExecution(value) {
       need(!anchor, "ONE_ACQUISITION_ONLY"); anchor = value as Anchor;
       const held = lifetime.retain(value); tokens++;
@@ -104,7 +104,7 @@ async function apply(message: CodexCliUpdateWorkerRunMessage) {
     startWindowsChild(invocation) {
       automaticAllowed();
       need(invocation.policy === "installer" && ++starts === 1, "NO_PACK_VERSION_OR_SECOND_CHILD");
-      need(Atomics.load(gate, 0) === 2 && Atomics.load(fence, 0) === 2, "REAL_COMMIT_CAS_REQUIRED");
+      need(Atomics.load(gate, 0) === message.owner && Atomics.load(fence, 0) === 2, "REAL_COMMIT_CAS_REQUIRED");
       instrumentOwner(); native = new WindowsChildNative(); realQuery = native.k.QueryInformationJobObject;
       childStarted = performance.now();
       // Trusted seam substitutes ONLY the owned Bun descendant fixture for npm.

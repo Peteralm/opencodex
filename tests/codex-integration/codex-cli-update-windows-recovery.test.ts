@@ -1,0 +1,156 @@
+import { expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
+import { helperPath } from "../helpers/repo-root";
+import { trackBackgroundWork } from "../../src/lib/background-work";
+import { startWindowsCliChild } from "../../src/codex/windows-cli-child";
+import { prepareRetentionFixture } from "../helpers/windows-cli-apply-retention-fixture";
+import { trustWindowsTempFixtureAncestry } from "../helpers/windows-temp-ancestry";
+import { createCodexCliUpdatePlan } from "../../src/codex/cli-update-plan";
+import { applyCodexCliUpdate } from "../../src/codex/cli-update-apply";
+import { recoverClosedCodexCliUpdateWorker } from "../../src/codex/cli-update-worker-recovery";
+import * as recovery from "../../src/codex/cli-update-recovery";
+import { codexCliUpdateSelectionGate, createCodexCliUpdateFence, allocateCodexCliUpdateGateOwner,
+  createWorkerCommitWindow, beginCodexCliSelectionParentWrite, resetCodexCliSelectionGatesForTests,
+  type CodexCliSelectionParentWrite } from "../../src/codex/cli-update-selection-gate";
+
+const native = process.platform === "win32" && process.arch === "x64" ? test : test.skip;
+async function until(check: () => boolean, deadline = Date.now() + 30000) {
+  while (!check()) { if (Date.now() >= deadline) throw new Error("fixture_handshake_timeout"); await Bun.sleep(10); }
+}
+native("a terminal version child with an unconfirmed guardian keeps the bounded reap result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-guardian-reap-"));
+  const child = startWindowsCliChild({ executable: process.execPath, args: ["-e", "process.exit(0)"],
+    cwd: root, env: { SystemRoot: process.env.SystemRoot, TEMP: root, TMP: root }, policy: "version" });
+  await until(() => child.observe().terminal);
+  // A real unsignaled native waitable models an observer whose exit is unproven.
+  const event = child.native.keep(child.native.k.CreateEventW(null, 1, 0, null));
+  child.recoveryGuardian = event;
+  const policy = child.policy as { deadlineMs: number; reapMs: number }; policy.deadlineMs = 0; policy.reapMs = 0;
+  try { expect(await child.wait()).toMatchObject({ terminal: false, cleanupComplete: false, reason: "recovery_observer_state_unknown" }); }
+  finally { child.recoveryGuardian = 0n; child.native.close(event); }
+  expect(await child.wait()).toMatchObject({ terminal: true, cleanupComplete: true });
+}, 15000);
+native("Windows durable uncertainty fences a fresh gate before native creation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-pre-spawn-arm-")), config = join(root, "config");
+  await hardenSecretDirAsync(root, { required: true }); mkdirSync(config);
+  await hardenSecretDirAsync(config, { required: true }); trustWindowsTempFixtureAncestry(root);
+  const token = crypto.randomUUID(), before = process.env.OPENCODEX_HOME;
+  process.env.OPENCODEX_HOME = config;
+  const durable = recovery.createCodexCliUpdateRecovery(token, config);
+  const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence(), owner = allocateCodexCliUpdateGateOwner(gate);
+  const window = createWorkerCommitWindow({ gate, fence, owner, recovery: durable });
+  try {
+    expect(window.tryEnter()).toBe(true); durable.arm();
+    resetCodexCliSelectionGatesForTests(); // Restarted memory must consult durable uncertainty.
+    expect(beginCodexCliSelectionParentWrite().entered).toBe(false);
+    recoverClosedCodexCliUpdateWorker(gate, fence, owner, token, config);
+    expect(window.commit()).toBe(false);
+    const writer = beginCodexCliSelectionParentWrite(); expect(writer.entered).toBe(true); writer.exit();
+  } finally {
+    window.exit(); resetCodexCliSelectionGatesForTests();
+    if (before === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = before;
+  }
+}, 60000);
+for (const during of ["arm", "publication"] as const) native(`Windows close cannot use a previous child's proof during ${during}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-proof-generation-")), configDir = join(root, "config");
+  await hardenSecretDirAsync(root, { required: true }); mkdirSync(configDir);
+  await hardenSecretDirAsync(configDir, { required: true }); trustWindowsTempFixtureAncestry(root);
+  resetCodexCliSelectionGatesForTests();
+  const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence(), owner = allocateCodexCliUpdateGateOwner(gate);
+  const staleProof = spyOn(recovery, "closedWindowsCodexCliUpdateChildGone").mockReturnValue(true);
+  let calls = 0, entered = false;
+  const close = () => {
+    recoverClosedCodexCliUpdateWorker(gate, fence, owner, crypto.randomUUID(), configDir);
+    const parent = beginCodexCliSelectionParentWrite(); entered = parent.entered; parent.exit();
+  };
+  const window = createWorkerCommitWindow({ gate, fence, owner, recovery: {
+    arm() { if (++calls === 2 && during === "arm") close(); },
+    child() { if (during === "publication") close(); }, terminal() {},
+  } });
+  try {
+    expect(window.tryEnter()).toBe(true); expect(window.commit()).toBe(true);
+    if (during === "arm") window.childStarted!(123);
+    const starting = () => window.childStarting!(`Global\\ocx-cli-${crypto.randomUUID()}`);
+    if (during === "arm") expect(starting).toThrow("cli_update_owner_recovering"); else starting();
+    if (during === "publication") window.childStarted!(123);
+    expect(entered).toBe(false);
+    expect(staleProof).not.toHaveBeenCalled();
+  } finally { staleProof.mockRestore(); window.exit(); resetCodexCliSelectionGatesForTests(); }
+}, 60000);
+for (const acquired of [true, false]) native(`Windows apply seals close before a late ${acquired ? "commit" : "acquisition"}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-windows-close-"));
+  await hardenSecretDirAsync(root, { required: true }); trustWindowsTempFixtureAncestry(root);
+  const f = await prepareRetentionFixture(root); mkdirSync(f.configDir);
+  const previous = process.env.OPENCODEX_HOME; process.env.OPENCODEX_HOME = f.configDir;
+  resetCodexCliSelectionGatesForTests();
+  const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence();
+  const owner = allocateCodexCliUpdateGateOwner(gate), window = createWorkerCommitWindow({ gate, fence, owner });
+  let writer: CodexCliSelectionParentWrite | undefined, closed = false, starts = 0;
+  const close = () => {
+    recoverClosedCodexCliUpdateWorker(gate, fence, owner, crypto.randomUUID(), f.configDir);
+    writer = beginCodexCliSelectionParentWrite(); expect(writer.entered).toBe(true);
+    expect(window.commit()).toBe(false);
+    writer.exit();
+    expect(window.tryEnter()).toBe(false);
+    closed = true;
+  };
+  try {
+    const plan = await createCodexCliUpdatePlan(f.deps); expect(plan.applicable).toBe(true);
+    const result = await applyCodexCliUpdate(plan.planId!, { ...f.deps,
+      commitWindow: acquired ? window : { ...window, tryEnter() { close(); return window.tryEnter(); } },
+      scanProcesses() {
+        if (acquired && Atomics.load(new Int32Array(gate), 0) === owner) close();
+        return { kind: "observed", processes: [] };
+      },
+      startWindowsChild() { starts++; throw new Error("late_installer_must_not_start"); },
+    });
+    expect(closed).toBe(true); expect(starts).toBe(0);
+    expect(result).toMatchObject({ outcome: "refused", leaseRetained: false });
+    expect(window.commit()).toBe(false);
+  } finally {
+    writer?.exit(); resetCodexCliSelectionGatesForTests();
+    if (previous === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previous;
+  }
+}, 60000);
+for (const descendant of [false, true]) native(`restarted Windows admission fences the surviving native ${descendant ? "descendant" : "installer"} Job, including home aliases`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-windows-restart-"));
+  await hardenSecretDirAsync(root, { required: true });
+  const config = join(root, "config"), alias = join(root, "home-alias");
+  const helper = helperPath("windows-cli-restart-recovery.ts");
+  const env = { ...process.env, OPENCODEX_HOME: config };
+  let settled!: () => void;
+  trackBackgroundWork("native restart recovery fixture", new Promise<void>(resolve => { settled = resolve; }));
+  const owner = Bun.spawn([process.execPath, helper, descendant ? "owner-descendant" : "owner", root], { env, stdout: "pipe", stderr: "pipe" });
+  try {
+  const error = await new Response(owner.stderr).text();
+  expect({ exit: await owner.exited, error }).toEqual({ exit: 0, error: "" });
+  expect(existsSync(join(root, "identity.json"))).toBe(true);
+  const identity = JSON.parse(readFileSync(join(root, "identity.json"), "utf8"));
+  const store = join(config, "codex-cli-update-recovery");
+  const records = readdirSync(store).filter(name => name.endsWith(".json")); expect(records).toHaveLength(1);
+  const record = JSON.parse(readFileSync(join(store, records[0]!), "utf8"));
+  expect(record).toMatchObject({ phase: "child", pgid: identity.pid, windows: { creationTime: identity.creationTime } });
+  expect(record.windows.jobName).toMatch(/^Global\\ocx-cli-/);
+  symlinkSync(config, alias, "junction");
+  const probe = (home = config) => {
+    const result = Bun.spawnSync([process.execPath, helper, "probe", root], { env: { ...env, OPENCODEX_HOME: home } });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    return JSON.parse(result.stdout.toString()).entered as boolean;
+  };
+    writeFileSync(join(root, "ping"), "ping"); await until(() => existsSync(join(root, "pong")));
+    expect(probe()).toBe(false);
+    expect(probe(alias)).toBe(false);
+    writeFileSync(join(root, "stop"), "stop");
+  await until(() => probe());
+  expect(probe(alias)).toBe(true);
+  const proofPath = join(store, record.token + ".proof"), proof = readFileSync(proofPath, "utf8");
+  const foreign = JSON.parse(proof); foreign.windows.jobName = `Global\\ocx-cli-${crypto.randomUUID()}`;
+  writeFileSync(proofPath, JSON.stringify(foreign)); expect(probe()).toBe(false);
+  writeFileSync(proofPath, "{"); expect(probe(alias)).toBe(false);
+  writeFileSync(proofPath, proof); expect(probe()).toBe(true);
+  settled(); // Actual Job/receipt proof, not owner-process exit alone.
+  } finally { writeFileSync(join(root, "stop"), "stop"); }
+}, 90000);

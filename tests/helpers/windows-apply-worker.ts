@@ -1,7 +1,7 @@
 /** Owned offline fixture driver, never a production dispatch or installer input. */
 import { applyCodexCliUpdate } from "../../src/codex/cli-update-apply";
 import { createCodexCliWorkerLifetime } from "../../src/codex/cli-update-worker";
-import { createWorkerCommitWindow, codexCliUpdateIsCancelled } from "../../src/codex/cli-update-selection-gate";
+import { allocateCodexCliUpdateGateOwner, createWorkerCommitWindow, codexCliUpdateIsCancelled } from "../../src/codex/cli-update-selection-gate";
 import { startWindowsCliChild } from "../../src/codex/windows-cli-child";
 
 declare const self: Worker;
@@ -15,11 +15,12 @@ if (Bun.isMainThread === false) {
     const nativeSettlements: { terminal: boolean; cleanupComplete: boolean }[] = [];
     const abort = new AbortController();
     const view = new Int32Array(gate), word = new Int32Array(fence);
+    const owner = allocateCodexCliUpdateGateOwner(gate);
     try {
       const result = await applyCodexCliUpdate(planId, {
         platform: "win32", inspectionDeps, signal: abort.signal,
         isCancelled: codexCliUpdateIsCancelled(fence),
-        commitWindow: createWorkerCommitWindow({ gate, fence }),
+        commitWindow: createWorkerCommitWindow({ gate, fence, owner }),
         retainExecution: owner => lifetime.retain(owner),
         resolveTarget: () => ({ kind: "resolved", version: "1.1.0",
           integrity: target.set.main.integrity, artifacts: target.set }),
@@ -31,10 +32,10 @@ if (Bun.isMainThread === false) {
         },
         startWindowsChild: invocation => {
           const installing = invocation.policy === "installer";
-          if (installing && (Atomics.load(view, 0) !== 2 || Atomics.load(word, 0) !== 2)) throw new Error("native start outside commit");
+          if (installing && (Atomics.load(view, 0) !== owner || Atomics.load(word, 0) !== 2)) throw new Error("native start outside commit");
           const child = startWindowsCliChild(invocation), wait = child.wait.bind(child);
           child.wait = async () => {
-            if (Atomics.load(view, 0) !== 2) throw new Error("installation exclusion lost during native wait");
+            if (Atomics.load(view, 0) !== owner) throw new Error("installation exclusion lost during native wait");
             const result = await wait();
             nativeSettlements.push({ terminal: result.terminal, cleanupComplete: result.cleanupComplete });
             return result;

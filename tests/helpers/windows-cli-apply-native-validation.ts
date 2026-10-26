@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { trustWindowsTempFixtureAncestry } from "./windows-temp-ancestry";
 /** Private A1/A2 driver. No installer, provider or production request DTO seam. */
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
@@ -83,9 +85,10 @@ function restoreInstrumentation() {
   owned.context.pins.release = owned.release;
 }
 async function prepareFixture() {
-  owned.root = mkdtempSync(join(parse(process.cwd()).root, "ocx-native-acquire-"));
+  owned.root = mkdtempSync(join(tmpdir(), "ocx-native-acquire-"));
   emit("started", { fixtureRoot: owned.root, name: NATIVE_ACQUISITION_CASES[owned.ids!.caseId] });
   await hardenSecretDirAsync(owned.root, { required: true });
+  trustWindowsTempFixtureAncestry(owned.root);
   owned.prefix = join(owned.root, "prefix");
   const mainRoot = join(owned.prefix, "node_modules/@openai/codex");
   const backingRoot = join(owned.prefix, "node_modules/@openai/codex-win32-x64");

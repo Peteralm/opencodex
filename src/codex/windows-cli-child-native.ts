@@ -7,6 +7,9 @@ export const WIN64_CHILD_ABI = Object.freeze({ securityAttributes: 24, securityD
   overlapped: 32, event: 24, jobAccounting: 48, activeProcesses: 40 });
 const KERNEL = {
   GetLastError: { args: [], returns: "u32" },
+  SetLastError: { args: ["u32"], returns: "void" },
+  SetHandleInformation: { args: ["u64", "u32", "u32"], returns: "i32" },
+  DuplicateHandle: { args: ["u64", "u64", "u64", "ptr", "u32", "i32", "u32"], returns: "i32" },
   GetCurrentProcess: { args: [], returns: "u64" },
   CompareStringOrdinal: { args: ["ptr", "i32", "ptr", "i32", "i32"], returns: "i32" },
   CreateJobObjectW: { args: ["ptr", "ptr"], returns: "u64" },

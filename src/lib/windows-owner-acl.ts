@@ -358,3 +358,11 @@ export async function verifyWindowsEntriesAclAsync(entries: readonly WindowsAclE
     return result.success && !result.timedOut && windowsEntriesAclMatches(result.stdout, entries);
   } catch { return false; }
 }
+/** Synchronous admission/commit boundaries use the identical mixed-policy parser. */
+export function verifyWindowsEntriesAcl(entries: readonly WindowsAclEntry[], timeoutMs: number): boolean {
+  if (entries.length === 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return false;
+  try {
+    const result = ownerAclRunner(entries, Math.max(1, Math.min(WINDOWS_OWNER_ACL_TIMEOUT_MS, Math.floor(timeoutMs))));
+    return result.success && !result.timedOut && windowsEntriesAclMatches(result.stdout, entries);
+  } catch { return false; }
+}

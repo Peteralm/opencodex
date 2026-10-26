@@ -3,6 +3,7 @@ import { chmodSync, closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdir
   readFileSync, readSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { getConfigDir } from "../config";
+import { assertTrustedCodexCliAncestry } from "./cli-update-paths";
 import type { CodexCliApplyResult } from "./cli-update-apply";
 import { CODEX_CLI_JOB_REASONS as SAFE_REASONS, CODEX_CLI_JOB_CLEANUP_ERRORS,
   CODEX_CLI_JOB_STORE_DIR, CODEX_CLI_JOB_STORE_FILE, CODEX_CLI_JOB_STORE_LOCK, CODEX_CLI_JOB_STORE_MAX_BYTES,
@@ -39,20 +40,8 @@ function paths(configDir = getConfigDir()) {
   return { config, dir, file: join(dir, CODEX_CLI_JOB_STORE_FILE), lock: join(dir, CODEX_CLI_JOB_STORE_LOCK) };
 }
 function assertTrustedConfigAncestry(parent: string) {
-  const euid = process.geteuid?.();
-  if (euid === undefined) throw new Error("unsupported_store");
-  let current = resolve(parent);
-  for (;;) {
-    const stat = lstatSync(current);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.uid !== euid && stat.uid !== 0)
-      || realpathSync.native(current) !== current) throw new Error("unsafe_store");
-    const sharedWritable = (stat.mode & 0o022) !== 0;
-    const stickyRootDirectory = (stat.mode & 0o1000) !== 0 && stat.uid === 0;
-    if (sharedWritable && !stickyRootDirectory) throw new Error("unsafe_store");
-    const ancestor = dirname(current);
-    if (ancestor === current) return;
-    current = ancestor;
-  }
+  try { assertTrustedCodexCliAncestry(parent); }
+  catch { throw new Error("unsafe_store"); }
 }
 function prepare(configDir?: string, create = false, createConfigRoot = false) {
   const p = paths(configDir);
@@ -357,20 +346,23 @@ export async function finishCodexCliUpdateJob(jobId: string, generation: string,
 }
 
 export async function runCodexCliUpdateJob(jobId: string, generation: string, run: () => Promise<CodexCliApplyResult>, configDir?: string): Promise<CodexCliUpdateJobDto | null> {
-  let ownsExecution = false;
+  // Reserve this invocation before any asynchronous store admission/publication.
+  // A contender must never release the admitted generation while its owner yields.
+  const ownsExecution = live.get(jobId) === generation && !started.has(jobId);
+  if (ownsExecution) started.add(jobId);
   return runCodexCliUpdateJobWork(run, {
     begin: () => withLedgerLock(configDir, false, async io => {
       const store = await io.readStore(); const index = store.jobs.findIndex(job => job.id === jobId);
       if (index < 0 || store.jobs[index]!.generation !== generation) throw new Error("job_generation_changed");
-      if (live.get(jobId) !== generation || started.has(jobId)) throw new Error("job_not_owned");
+      if (!ownsExecution || live.get(jobId) !== generation) throw new Error("job_not_owned");
       const current = store.jobs[index]!; const next = { ...current, revision: current.revision + 1, status: "running" as const, updatedAt: now() };
-      store.jobs[index] = next; await io.writeStore(store); started.add(jobId); ownsExecution = true; return next.revision;
+      store.jobs[index] = next; await io.writeStore(store); return next.revision;
     }),
     finish: (revision, result) => finishCodexCliUpdateJob(jobId, generation, revision, result, configDir),
     read: () => readCodexCliUpdateJob(jobId, configDir),
     release: () => {
-      if (live.get(jobId) === generation && (ownsExecution || !started.has(jobId))) {
-        live.delete(jobId); if (ownsExecution) started.delete(jobId);
+      if (ownsExecution && live.get(jobId) === generation) {
+        live.delete(jobId); started.delete(jobId);
       }
     },
   });

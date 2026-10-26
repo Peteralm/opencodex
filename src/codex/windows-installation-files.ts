@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { win32 } from "node:path";
 import type { Library, Symbols } from "bun:ffi";
 import { MAX_NATIVE_BACKING_BYTES } from "./cli-installation-limits";
 
@@ -8,6 +9,7 @@ const KERNEL_SYMBOLS = {
   CreateFileW: { args: ["ptr", "u32", "u32", "ptr", "u32", "u32", "u64"], returns: "u64" },
   GetFileInformationByHandleEx: { args: ["u64", "i32", "ptr", "u32"], returns: "i32" },
   GetFileType: { args: ["u64"], returns: "u32" },
+  GetFinalPathNameByHandleW: { args: ["u64", "ptr", "u32", "u32"], returns: "u32" },
   ReadFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
   CloseHandle: { args: ["u64"], returns: "i32" },
 } as const satisfies Symbols;
@@ -25,6 +27,10 @@ export interface WindowsInstallationFileRequest {
   readonly prefixOnly?: boolean;
   /** Same held stream, domain-separated archive/readback comparison. Default remains raw SHA-256. */
   readonly installationDigest?: boolean;
+  /** Hold a directory rather than a file; requires metadataOnly. */
+  readonly directory?: boolean;
+  /** Refuse aliases unless the held object's normalized DOS name matches the input. */
+  readonly requireCanonicalPath?: boolean;
 }
 export interface WindowsInstallationFileIdentity {
   readonly volumeSerial: string;
@@ -62,6 +68,11 @@ const MAX_REQUEST_BYTES = MAX_NATIVE_BACKING_BYTES + (128 + 12) * MIB;
 const REPARSE = 0x400;
 const DIRECTORY = 0x10;
 const INVALID_HANDLE = 0xffffffffffffffffn;
+/** Compare the normalized DOS long name returned by an already-held handle. */
+export function windowsCanonicalPathMatches(path: string, canonical: string): boolean {
+  return canonical.startsWith("\\\\?\\")
+    && canonical.slice(4).toLowerCase() === win32.normalize(path).toLowerCase();
+}
 let openedForTests: (() => void) | undefined;
 /** Runs after handles are held, for real Windows sharing/rename regression fixtures. */
 export function setWindowsInstallationFilesOpenedForTests(callback?: () => void): void {
@@ -105,6 +116,9 @@ export async function inspectWindowsInstallationFiles(
       || (request.metadataOnly !== undefined && typeof request.metadataOnly !== "boolean")
       || (request.prefixOnly !== undefined && typeof request.prefixOnly !== "boolean")
       || (request.installationDigest !== undefined && typeof request.installationDigest !== "boolean")
+      || (request.directory !== undefined && typeof request.directory !== "boolean")
+      || (request.requireCanonicalPath !== undefined && typeof request.requireCanonicalPath !== "boolean")
+      || (request.directory && !request.metadataOnly)
       || request.maxBytes > (request.hashOnly ? MAX_NATIVE_BACKING_BYTES : MIB)) return null;
     ceiling += request.maxBytes;
     return parsedPath;
@@ -198,6 +212,17 @@ export async function inspectWindowsInstallationFiles(
       return handle;
     };
     const directories = new Map<string, bigint>();
+    const checkCanonicalPath = (handle: bigint, path: string): void => {
+      const output = Buffer.alloc(32768 * 2);
+      // FILE_NAME_NORMALIZED | VOLUME_NAME_DOS: a final long name from the
+      // already held, reparse-refusing handle, never realpath/check/reopen.
+      const length = k.GetFinalPathNameByHandleW!(handle, ffi.ptr(output), 32768, 0);
+      if (!length || length >= 32768) throw new InspectionRefusal("inspection-failed");
+      const canonical = output.toString("utf16le", 0, length * 2);
+      if (!windowsCanonicalPathMatches(path, canonical)) {
+        throw new InspectionRefusal("invalid-request");
+      }
+    };
     const files = requests.map((request, index) => {
       const { drive, names } = parsed[index]!;
       let parent = root(drive);
@@ -211,8 +236,9 @@ export async function inspectWindowsInstallationFiles(
         }
         parent = handle;
       }
-      const handle = relativeOpen(parent, names[names.length - 1]!, false);
-      const identity = inspect(handle, false);
+      const handle = relativeOpen(parent, names[names.length - 1]!, Boolean(request.directory));
+      const identity = inspect(handle, Boolean(request.directory));
+      if (request.requireCanonicalPath) checkCanonicalPath(handle, request.path);
       if (!request.metadataOnly && !(request.prefixOnly && !request.hashOnly)
         && identity.size > request.maxBytes) throw new InspectionRefusal("size-limit");
       return { request, handle, identity };
@@ -250,7 +276,8 @@ export async function inspectWindowsInstallationFiles(
     });
     if (finalize && !await finalize(observed)) throw new InspectionRefusal("identity-changed");
     for (const file of files) {
-      if (JSON.stringify(inspect(file.handle, false)) !== JSON.stringify(file.identity)) {
+      if (file.request.requireCanonicalPath) checkCanonicalPath(file.handle, file.request.path);
+      if (JSON.stringify(inspect(file.handle, Boolean(file.request.directory))) !== JSON.stringify(file.identity)) {
         throw new InspectionRefusal("identity-changed");
       }
     }
