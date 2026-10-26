@@ -1059,3 +1059,5 @@ OpenCodex refuses those ambiguous settings. It also refuses an
 unsafe target or a row edited since apply. The integration is loopback only and
 never copies provider credentials. Factory documents the [BYOK schema](https://docs.factory.ai/model-independence/byok)
 and [personal settings path](https://docs.factory.ai/droid-cli/settings).
+
+JSONC client configuration accepts CR, LF and CRLF line endings, including after `//` comments.
