@@ -69,7 +69,7 @@ function copyValue(value: unknown, seen: Set<object>): unknown {
       if (entry === undefined) continue;
       const item = copyValue(entry, seen);
       if (item === REFUSED) return REFUSED;
-      copied[key] = item;
+      Object.defineProperty(copied, key, { value: item, enumerable: true, writable: true, configurable: true });
     }
     return copied;
   } finally {
