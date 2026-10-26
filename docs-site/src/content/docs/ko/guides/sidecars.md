@@ -158,3 +158,5 @@ OpenCodex가 `web_search` 가로채기를 멈추고 Codex 통합이 `~/.codex/co
 파일을 직접 고치고 싶다면 이전처럼 `config.json`에서 `enabled`를 `false`로 두면 됩니다. Anthropic OAuth 검색과 이미지 설명은 기존 Claude Code OAuth
 fingerprint 선례를 따르지만, 실제 계정과 작업량으로 충분히 soak test하는 편이 좋습니다. 전체
 필드는 [설정 레퍼런스](/ko/reference/configuration/server/#sidecars)를 참고하세요.
+
+검색 응답의 선택 필드 형식이 잘못되어도 유효한 답변과 출처는 유지합니다. 오류 메시지 값의 형식이 잘못되면 일반 실패 메시지를 표시합니다.

@@ -57,3 +57,5 @@ routing. Do not infer an exact account from caller-supplied account headers, pro
 selection, connection identity, or other ambient state; concurrent threads could cross-route
 credentials. Extending exact routing to those endpoints requires an opaque client correlation that
 can be bound server-side to a previously validated selector.
+
+The Responses sidecar parser in `src/web-search/parse.ts` checks runtime field shapes before consuming events: non-string types, non-array output/annotations and null content entries cannot throw away accumulated text. Failure messages remain strings; malformed message values use the existing terminal diagnostic.

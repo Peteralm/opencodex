@@ -283,3 +283,5 @@ Claude Code OAuth fingerprint precedent, but should be soak-tested with the
 intended account and workload.
 
 See the [Configuration reference](/reference/configuration/server/#sidecars) for every field.
+
+Search responses with malformed optional fields retain valid answer text and citations. Invalid error-message values use a generic failure message.

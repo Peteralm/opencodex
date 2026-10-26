@@ -185,11 +185,11 @@ function fromOutputArray(output: OutputItem[], seen: Set<string>): WebSearchResu
   let text = "";
   const sources: WebSearchSource[] = [];
   for (const item of output) {
-    if (item.type !== "message" || !Array.isArray(item.content)) continue;
+    if (!item || item.type !== "message" || !Array.isArray(item.content)) continue;
     for (const block of item.content) {
-      if (block.type === "output_text" && typeof block.text === "string") {
+      if (block?.type === "output_text" && typeof block.text === "string") {
         text += block.text;
-        for (const ann of block.annotations ?? []) collectAnnotation(ann, sources, seen);
+        for (const ann of Array.isArray(block.annotations) ? block.annotations : []) collectAnnotation(ann, sources, seen);
       }
     }
   }
@@ -276,7 +276,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
       return;
     }
     const data = parsed as Record<string, unknown>;
-    const type = data.type as string | undefined;
+    const type = typeof data.type === "string" ? data.type : undefined;
     if (type === "response.output_text.delta" && typeof data.delta === "string") {
       if (acceptDecodedChars(data.delta.length)) acc.deltaText += data.delta;
     } else if (type === "response.output_text.done" && typeof data.text === "string") {
@@ -285,7 +285,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
     } else if (type === "response.completed" || type === "response.done") {
       acc.terminalEvent = true;
       const resp = data.response as { output?: OutputItem[] } | undefined;
-      if (resp?.output) {
+      if (Array.isArray(resp?.output)) {
         const final = fromOutputArray(resp.output, seen);
         if (acceptDecodedChars(final.text.length)) acc.final = final;
       }
@@ -295,7 +295,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
       const msg = resp?.error?.message
         ?? (data.error as { message?: string } | undefined)?.message
         ?? (typeof data.message === "string" ? data.message : undefined);
-      acc.error = msg ?? `sidecar stream ended with ${type}`;
+      acc.error = typeof msg === "string" ? msg : `sidecar stream ended with ${type}`;
     } else if (type?.includes("reasoning") && typeof data.delta === "string") {
       // Reasoning is not returned, but it is still decoded payload retained transiently by JSON.parse.
       acceptDecodedChars(data.delta.length);
