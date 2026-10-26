@@ -833,6 +833,7 @@ async fn run(app: &AppHandle, started: Instant) {
         endpoint,
         home: answer.home(),
     };
+    crate::recovery::bind_home(app, &target.home);
     let proxy = match ProxyClient::new(endpoint, Auth::new(answer.home())) {
         Ok(proxy) => proxy,
         Err(error) => {

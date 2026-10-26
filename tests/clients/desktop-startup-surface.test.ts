@@ -42,7 +42,7 @@ describe("desktop startup surface", () => {
     expect(begun).toBeGreaterThan(shown);
   });
 
-  test("setup resolves nothing, registers nothing and starts nothing", () => {
+  test("setup does not resolve, register startup integration or spawn the proxy itself", () => {
     const setup = lib.slice(
       lib.indexOf(".setup(|app|"),
       lib.indexOf(".build(tauri::generate_context!())"),
@@ -60,6 +60,19 @@ describe("desktop startup surface", () => {
     ]) {
       expect(setup).not.toContain(call);
     }
+  });
+
+  test("native recovery evidence precedes the first startup run and takes its home from resolved CLI output", () => {
+    const publish = lib.indexOf("recovery::register(app.handle())");
+    expect(publish).toBeGreaterThan(lib.indexOf("window::show(&window)"));
+    expect(publish).toBeLessThan(lib.indexOf("startup::begin(app.handle())"));
+    expect(lib.indexOf("app.manage(exit::ExitCoordinator::new())")).toBeLessThan(publish);
+    const bind = startup.indexOf("crate::recovery::bind_home(app, &target.home)");
+    expect(bind).toBeGreaterThan(startup.indexOf("home: answer.home()"));
+    expect(bind).toBeLessThan(startup.indexOf("match spawn_runtime(app, endpoint, &watch)"));
+    const producer = code(repoPath(`${SRC}/recovery.rs`));
+    expect(producer).toContain("exit.supervision()");
+    expect(producer).toMatch(/s\.wanted\s*&&\s*!s\.reason_set/);
   });
 
   test("resolving and registering are states that own their work", () => {

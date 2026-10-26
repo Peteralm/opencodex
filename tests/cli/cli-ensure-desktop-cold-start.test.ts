@@ -70,6 +70,39 @@ describe("ocx ensure cold start under OpenCodex Desktop (#6971)", () => {
     expect(calls).toEqual({ launches: 0, waits: [], released: 0 });
   });
 
+  test("verified unclaimed Desktop recovery keeps its supervised replacement during the restart gap", async () => {
+    const calls = fresh();
+    const result = await runDesktopColdStart({
+      ...deps({ ownership: "other", process: "running" }, calls),
+      desktopRecovery: async () => ({ kind: "recovering" as const }),
+    });
+    expect(result).toEqual({ kind: "live", live: { port: 10100 } });
+    expect(calls).toEqual({ launches: 0, waits: [DESKTOP_COLD_START_TIMEOUT_MS], released: 0 });
+  });
+
+  test("a verified Desktop that stopped or cannot finish its recovery proof never falls back to CLI", async () => {
+    for (const kind of ["stopped", "unknown"] as const) {
+      const calls = fresh();
+      const result = await runDesktopColdStart({
+        ...deps({ ownership: "other", process: "running" }, calls),
+        desktopRecovery: async () => ({ kind }),
+      });
+      expect(result.kind).toBe("failed");
+      expect(calls).toEqual({ launches: 0, waits: [], released: 0 });
+    }
+  });
+
+  test("ownership is observed after asynchronous native evidence, so a new claim still governs startup", async () => {
+    let ownership: DesktopOwnershipState = "other";
+    const calls = fresh();
+    const result = await runDesktopColdStart({
+      ...deps({ ownership, process: "absent" }, calls), ownership: () => ownership,
+      desktopRecovery: async () => { ownership = "desktop"; return { kind: "none" }; },
+    });
+    expect(result.kind).toBe("live");
+    expect(calls.launches).toBe(1);
+  });
+
   test("a Desktop that never brings its proxy back fails without a CLI fallback", async () => {
     const calls = fresh();
     const result = await runDesktopColdStart(deps({ ownership: "desktop", process: "running", live: false }, calls));
