@@ -11,13 +11,13 @@
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import { admitCodexCliUpdateJob, finishCodexCliUpdateJob, readCodexCliUpdateJob, runCodexCliUpdateJob } from "../../src/codex/cli-update-job";
 import { codexCliUpdateUnjoinedWorkerCount, runCodexCliUpdateApplyInWorker } from "../../src/codex/cli-update-job-worker";
 import { FIXTURE_CONTROL_WORDS, FIXTURE_RELEASE } from "../helpers/cli-update-fixture-worker";
-import { setWindowsOwnerAclAsyncRunnerForTests, windowsEntriesAclMatches,
+import { setWindowsOwnerAclAsyncRunnerForTests, windowsEntriesAclMatches, windowsOwnerAclDefaultRunnerForTests,
   type WindowsAclEntry } from "../../src/lib/windows-owner-acl";
 import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
 import { handleCodexCliUpdateRoutes } from "../../src/server/management/codex-cli-update-routes";
@@ -297,6 +297,92 @@ describe("Windows CLI update job store backend", () => {
     expect(existsSync(join(configDir, "codex-cli-update-jobs", "jobs.json"))).toBe(true);
     expect(existsSync(join(configDir, "codex-cli-update-jobs", "admission.lock"))).toBe(false);
     expect(JSON.stringify(terminal)).not.toMatch(/ownerPid|generation|payloadHash|requestKey|token|path/i);
+  }, 180_000);
+
+  test.skipIf(!winOnly)("a competing begin preserves ownership while running publication is pending", () => withOwnedFixture("ocx-winjob-begin-", async ({ configDir }) => {
+    const accepted = await admitCodexCliUpdateJob({ requestId: "win-begin-race-01", planId: result.planId, confirmed: true, configDir });
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    let gated = false, runs = 0;
+    // Real native handles and hardened objects; synthetic ACL replies hold the
+    // first publication before engine entry while the contender exhausts retries.
+    setWindowsOwnerAclAsyncRunnerForTests(async entries => {
+      if (!gated && entries.length === 1 && entries[0]!.path.endsWith(".tmp")) {
+        gated = true; entered.resolve(); await release.promise;
+      }
+      return { success: true, timedOut: false, stdout: aclRun(USER_SID, USER_SID, false,
+        entries.map(entry => ({ owner: USER_SID, flags: 4100,
+          aces: [allow(FULL_CONTROL, USER_SID, entry.directory ? 3 : 0)] }))) };
+    });
+    const engine = async () => { runs++; return result; };
+    const first = runCodexCliUpdateJob(accepted.job.jobId, accepted.generation, engine, configDir);
+    try {
+      await Promise.race([entered.promise, first.then(() => { throw new Error("begin settled before barrier"); })]);
+      expect(runs).toBe(0);
+      await runCodexCliUpdateJob(accepted.job.jobId, accepted.generation, engine, configDir);
+      expect(runs).toBe(0);
+      release.resolve();
+      await first;
+      setWindowsOwnerAclAsyncRunnerForTests(null);
+      expect(runs).toBe(1);
+      expect(await readCodexCliUpdateJob(accepted.job.jobId, configDir)).toMatchObject(
+        { status: "applied", reason: "verified_target", ownerState: "finished" });
+      const stored = JSON.parse(readFileSync(join(configDir, "codex-cli-update-jobs", "jobs.json"), "utf8"));
+      expect(stored.jobs[0]).toMatchObject({ status: "applied", revision: 2 });
+    } finally {
+      release.resolve(); await first.catch(() => {});
+      setWindowsOwnerAclAsyncRunnerForTests(null);
+    }
+  }), 180_000);
+
+  test.skipIf(!winOnly)("a pre-rename ACL failure removes the unpublished temp and preserves jobs.json", async () => {
+    const { configDir } = await fixture("ocx-winjob-temp-");
+    const input = { requestId: "win-temp-clean-01", planId: result.planId, confirmed: true as const, configDir };
+    const accepted = await admitCodexCliUpdateJob(input);
+    const dir = join(configDir, "codex-cli-update-jobs"), file = join(dir, "jobs.json");
+    const before = readFileSync(file, "utf8");
+    let injected = 0;
+    setWindowsOwnerAclAsyncRunnerForTests(async (entries, timeout) => {
+      if (entries.some(entry => entry.path.endsWith(".tmp"))) {
+        injected++;
+        return { success: false, timedOut: false, stdout: "" };
+      }
+      return windowsOwnerAclDefaultRunnerForTests(entries, timeout);
+    });
+    try {
+      for (const requestId of ["win-temp-clean-02", "win-temp-clean-03"]) {
+        await expect(admitCodexCliUpdateJob({ ...input, requestId })).rejects.toThrow("unsafe_store");
+        expect(readFileSync(file, "utf8")).toBe(before);
+        expect(readdirSync(dir).filter(name => /^\.jobs-.*\.tmp$/.test(name))).toEqual([]);
+        expect(existsSync(join(dir, "admission.lock"))).toBe(false);
+      }
+      expect(injected).toBe(2);
+    } finally { setWindowsOwnerAclAsyncRunnerForTests(null); }
+    expect(await readCodexCliUpdateJob(accepted.job.jobId, configDir)).toMatchObject({ status: "queued" });
+  }, 180_000);
+
+  test.skipIf(!winOnly)("a post-rename verification failure never deletes the published jobs.json", async () => {
+    const { configDir } = await fixture("ocx-winjob-published-");
+    const input = { requestId: "win-published-01", planId: result.planId, confirmed: true as const, configDir };
+    const accepted = await admitCodexCliUpdateJob(input);
+    let verifiedTemp = false, injected = 0;
+    setWindowsOwnerAclAsyncRunnerForTests(async (entries, timeout) => {
+      if (entries.some(entry => entry.path.endsWith(".tmp"))) verifiedTemp = true;
+      if (verifiedTemp && entries.some(entry => entry.path.endsWith("jobs.json"))) {
+        injected++;
+        return { success: false, timedOut: false, stdout: "" };
+      }
+      return windowsOwnerAclDefaultRunnerForTests(entries, timeout);
+    });
+    try {
+      await expect(admitCodexCliUpdateJob({ ...input, requestId: "win-published-02" })).rejects.toThrow("unsafe_store");
+      expect(injected).toBe(1);
+    } finally { setWindowsOwnerAclAsyncRunnerForTests(null); }
+    const dir = join(configDir, "codex-cli-update-jobs");
+    const stored = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+    expect(stored.jobs).toHaveLength(2);
+    expect(stored.jobs[0].id).toBe(accepted.job.jobId);
+    expect(readdirSync(dir).sort()).toEqual(["jobs.json"]);
+    expect(await readCodexCliUpdateJob(accepted.job.jobId, configDir)).toMatchObject({ status: "queued" });
   }, 180_000);
 
   test.skipIf(!winOnly)("a second process dedupes the admitted request key and conflicts on a different payload", async () => {

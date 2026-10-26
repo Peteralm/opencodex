@@ -460,6 +460,8 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
   const tempName = ".jobs-" + randomUUID() + ".tmp";
   const temp = join(prepared.dir, tempName);
   let leaf: bigint | undefined;
+  let tempIdentity: StoreIdentity | undefined;
+  let publishedName = false;
   try {
     const fd = openSync(temp, "wx", 0o600);
     try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
@@ -467,9 +469,11 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
     const stat = inspect(ctx, leaf, false);
     if (stat.links !== 1 || stat.size !== bytes) throw unsafe();
     if (!readAll(ctx, leaf, stat.size).equals(Buffer.from(body))) throw unsafe();
+    tempIdentity = stat;
     await hardenSecretPathAsync(temp, { required: true, timeoutMemoKey: prepared.file });
     await verifyAcl([{ path: temp, directory: false, policy: "private" }]);
     renamePinned(ctx, leaf, prepared.file);
+    publishedName = true;
     // The held handle now names jobs.json. A fresh name-open proves the published
     // path resolves to the identical object while the original handle is still held.
     let published: bigint | undefined;
@@ -487,7 +491,15 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
     }
     flushDir(ctx, prepared.jobdir);
   } finally {
-    try { unlinkSync(temp); } catch { /* already renamed or never created */ }
+    // A published leaf is jobs.json even if readback/flush subsequently fails.
+    // Only the verified unpublished object may be marked for delete-on-close.
+    if (!publishedName) {
+      try {
+        if (leaf !== undefined && tempIdentity !== undefined) {
+          if (sameIdentity(inspect(ctx, leaf, false), tempIdentity)) markDelete(ctx, leaf);
+        } else if (leaf === undefined) unlinkSync(temp);
+      } catch { /* unprovable cleanup stays fail-closed */ }
+    }
     forgetEphemeralSecretPath(temp);
     if (leaf !== undefined) ctx.pins.release(leaf, ctx.kernel);
   }

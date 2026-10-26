@@ -233,6 +233,12 @@ callers use that already-owned handle without wrapping it in another `keep` regi
 This applies to config/store pins, read/write/published leaves and lock/owner pins, so disposal
 does not revisit a stale duplicate registration after the original handle has closed.
 
+An execution invocation reserves its admitted generation before asynchronous admission or
+running-record publication; only that invocation releases the reservation after a failed begin.
+Competing deliveries cannot clear the live owner's completion authority. An unpublished verified
+ledger temp is deleted through its held handle before close. Successful rename disables that
+cleanup permanently for the invocation, including failures during published-name readback or flush.
+
 An ACL-query timeout fails closed without accepting a late result. Its PowerShell child may still
 hold transient handles while termination settles, so lock cleanup may fail and retain a busy mutex;
 the store does not automatically reclaim that leftover lock. Filtered-token behavior is also unverified.
