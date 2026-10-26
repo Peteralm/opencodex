@@ -245,3 +245,5 @@ discovery에 모두 적용됩니다.
 - `contentPartsToText(content)` — 텍스트 전용 툴 메시지를 위해 content part를 텍스트로
   평탄화합니다. 설명이 없는 이미지는 토큰을 폭증시키는 base64 blob 대신 짧은 `[image]` marker가
   됩니다.
+
+AWS EventStream 디코더는 종료 시 전송 계층 정리 완료를 기다리지 않고 취소를 시작합니다. 정리 작업이 멈춰도 읽기를 중단한 소비자가 디코더 종료를 계속 기다리지 않도록 합니다.

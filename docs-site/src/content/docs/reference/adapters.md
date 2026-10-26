@@ -826,3 +826,5 @@ For the official DeepSeek Chat Completions endpoint, opencodex relaxes regex and
 schema-validation HTTP 400 errors. Strict mode is omitted for this tool. Fields
 defined only inside an `anyOf` are no longer constrained by that union; the tool
 must validate its inputs. Other tools and providers retain their existing behavior.
+
+AWS EventStream decoder teardown initiates cancellation without waiting for transport cleanup to settle, so a stalled cleanup promise cannot hold the decoder open after the consumer stops reading.
