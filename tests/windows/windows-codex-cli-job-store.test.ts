@@ -13,7 +13,9 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs";
-import { join } from "node:path";
+import { join, relative, isAbsolute } from "node:path";
+import { tmpdir } from "node:os";
+import { trustWindowsTempFixtureAncestry } from "../helpers/windows-temp-ancestry";
 import { admitCodexCliUpdateJob, finishCodexCliUpdateJob, readCodexCliUpdateJob, runCodexCliUpdateJob } from "../../src/codex/cli-update-job";
 import { codexCliUpdateUnjoinedWorkerCount, runCodexCliUpdateApplyInWorker } from "../../src/codex/cli-update-job-worker";
 import { FIXTURE_CONTROL_WORDS, FIXTURE_RELEASE } from "../helpers/cli-update-fixture-worker";
@@ -159,17 +161,14 @@ describe("Windows CLI update job store backend", () => {
   });
 
   const winOnly = process.platform === "win32" && process.arch === "x64";
-  // The backend verifies ancestry instead of trusting a well-known root, so the
-  // fixture must sit under ancestors that actually pass: %TEMP% carries a foreign
-  // full-control grantee here and an automatic mkdir anywhere inherits foreign
-  // write. One hardened root under the volume root gives a clean write-private
-  // parent with a single trusted ancestor — the same hardening the store applies
-  // to directories it creates itself.
+  // The test adapter trusts ancestry above this hardened OS-temp root only.
+  // Every fixture object still runs its actual native pin and ACL policy.
   async function fixture(prefix: string, onCreated?: (root: string) => void): Promise<{ outer: string; configDir: string }> {
-    const outer = mkdtempSync("C:\\" + prefix);
+    const outer = mkdtempSync(join(tmpdir(), prefix));
     onCreated?.(outer);
     fixtures.push(outer);
     await hardenSecretDirAsync(outer, { required: true });
+    trustWindowsTempFixtureAncestry(outer);
     return { outer, configDir: join(outer, "ocx") };
   }
   async function withOwnedFixture(prefix: string,
@@ -181,6 +180,18 @@ describe("Windows CLI update job store backend", () => {
       await run(input);
     } finally { releaseBase?.(); }
   }
+  test("job-store fixture allocation stays inside the OS temp directory", async () => {
+    let requested = "";
+    const allocation = spyOn(fs, "mkdtempSync").mockImplementation(prefix => {
+      requested = String(prefix); throw new Error("allocation_observed");
+    });
+    try { await expect(fixture("ocx-location-" )).rejects.toThrow("allocation_observed"); }
+    finally { allocation.mockRestore(); }
+    const child = relative(tmpdir(), requested);
+    expect(child.length).toBeGreaterThan(0);
+    expect(child.startsWith("..")).toBe(false);
+    expect(isAbsolute(child)).toBe(false);
+  });
   function useHome(configDir: string): void {
     envStack.push(process.env.OPENCODEX_HOME);
     process.env.OPENCODEX_HOME = configDir;
@@ -393,11 +404,13 @@ describe("Windows CLI update job store backend", () => {
   }, 180_000);
 
   test.skipIf(!winOnly)("a second process dedupes the admitted request key and conflicts on a different payload", async () => {
-    const { configDir } = await fixture("ocx-winjob-twoproc-");
+    const { outer, configDir } = await fixture("ocx-winjob-twoproc-");
     mkdirSync(configDir);
     const modulePath = new URL("../../src/codex/cli-update-job.ts", import.meta.url).href;
     const accepted = await admitCodexCliUpdateJob({ requestId: "win-two-proc-01", planId: result.planId, confirmed: true, configDir });
-    const script = `import { admitCodexCliUpdateJob } from ${JSON.stringify(modulePath)};
+    const script = `import { trustWindowsTempFixtureAncestry } from ${JSON.stringify(new URL("../helpers/windows-temp-ancestry.ts", import.meta.url).href)};
+      trustWindowsTempFixtureAncestry(${JSON.stringify(outer)});
+      import { admitCodexCliUpdateJob } from ${JSON.stringify(modulePath)};
       const planId = process.argv.at(-1);
       try {
         const admitted = await admitCodexCliUpdateJob({ requestId: "win-two-proc-01", planId, confirmed: true });
@@ -494,7 +507,9 @@ describe("Windows CLI update job store backend", () => {
         : null;
       expect(observed).toMatchObject({ status: "running", ownerState: "active" });
       const modulePath = new URL("../../src/codex/cli-update-job.ts", import.meta.url).href;
-      const script = `import { readCodexCliUpdateJob } from ${JSON.stringify(modulePath)};
+      const script = `import { trustWindowsTempFixtureAncestry } from ${JSON.stringify(new URL("../helpers/windows-temp-ancestry.ts", import.meta.url).href)};
+        trustWindowsTempFixtureAncestry(${JSON.stringify(outer)});
+        import { readCodexCliUpdateJob } from ${JSON.stringify(modulePath)};
         console.log(JSON.stringify(await readCodexCliUpdateJob(${JSON.stringify(accepted.job.jobId)})));`;
       const releaseChild = holdFixture(outer);
       try {
