@@ -1377,9 +1377,16 @@ export async function resolveAndPersistCodexRuntimeAsync(
   deps: ResolveCodexRuntimeDeps = {},
   isCurrent: () => boolean = () => true,
 ): Promise<ResolveCodexRuntimeResult | null> {
-  const observation = await resolveCodexRuntimeObservationAsync(deps);
-  if (!isCurrent() || observation.epoch === null || observation.epoch !== resolveCacheEpoch
+  if (deps.signal?.aborted) return null;
+  let observation: AsyncRuntimeObservation;
+  try { observation = await resolveCodexRuntimeObservationAsync(deps); }
+  catch (error) {
+    if (deps.signal?.aborted) return null;
+    throw error;
+  }
+  if (deps.signal?.aborted || !isCurrent() || observation.epoch === null || observation.epoch !== resolveCacheEpoch
     || observation.inputs !== codexRuntimeSelectionIdentity(deps)) return null;
+  if (deps.signal?.aborted) return null;
   return cloneAndDeepFreeze(persistResolvedCodexRuntime(observation.result, deps));
 }
 

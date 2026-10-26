@@ -50,6 +50,53 @@ function warmRuntime() {
   runtime.setCodexRuntimeResolveCacheForTests({ runtime: selected, failures: [] }, { discoverAlternatives: false });
 }
 
+for (const phase of ["cold", "warm", "prepublication"] as const) {
+  test(`runtime wrapper cancellation is null and write-free at ${phase}`, async () => {
+    const file = join(root, "codex-runtime.json");
+    const before = JSON.stringify({ version: 1, command: selected.command, source: "environment", selectedVersion: "0.159.0", origin: "discovered", updatedAt: "2026-10-08T00:00:00Z" });
+    writeFileSync(file, before);
+    if (phase !== "cold") warmRuntime();
+    const controller = new AbortController();
+    if (phase !== "prepublication") controller.abort(new Error("fixture cancellation"));
+    const outcome = await runtime.resolveAndPersistCodexRuntimeAsync({ discoverAlternatives: false, signal: controller.signal }, () => {
+      if (phase === "prepublication") controller.abort(new Error("publication cancelled"));
+      return true;
+    }).then(value => ({ value, error: null }), error => ({ value: undefined, error }));
+    expect({ ...outcome, bytes: readFileSync(file, "utf8"), probes: exec.mock.calls.length })
+      .toEqual({ value: null, error: null, bytes: before, probes: 0 });
+  });
+}
+
+test("runtime wrapper contains an entered probe abort but raw resolver still rejects", async () => {
+  const entered = hold<void>(), released = hold<void>(), controller = new AbortController();
+  const deps: runtime.ResolveCodexRuntimeDeps = {
+    discoverAlternatives: false, signal: controller.signal,
+    execFile: async () => { entered.resolve(); await released.promise; throw new Error("probe cancelled"); },
+  };
+  const pending = runtime.resolveAndPersistCodexRuntimeAsync(deps);
+  const observed = pending.then(value => ({ value, error: null }), error => ({ value: undefined, error }));
+  try {
+    await Promise.race([entered.promise, observed.then(() => { throw new Error("wrapper settled before probe entry"); })]);
+    controller.abort(new Error("fixture cancellation"));
+  } finally { released.resolve(); }
+  const result = await observed;
+  expect({ ...result, persisted: existsSync(join(root, "codex-runtime.json")) })
+    .toEqual({ value: null, error: null, persisted: false });
+  const rawError = await runtime.resolveCodexRuntimeAsync(deps).then(() => null, error => error);
+  expect(rawError).toBeInstanceOf(Error);
+});
+
+test("runtime wrapper preserves non-cancellation exceptions", async () => {
+  warmRuntime();
+  const sentinel = new Error("currentness callback failed");
+  const error = await runtime.resolveAndPersistCodexRuntimeAsync({ discoverAlternatives: false }, () => { throw sentinel; })
+    .then(() => null, error => error);
+  expect(error).toBe(sentinel);
+  const deps = Object.defineProperty({}, "env", { get() { throw sentinel; } });
+  expect(await runtime.resolveAndPersistCodexRuntimeAsync(deps).then(() => null, error => error)).toBe(sentinel);
+  expect(existsSync(join(root, "codex-runtime.json"))).toBe(false);
+});
+
 test("concurrent async loads share one version/model flight and warm reload runs no child", async () => {
   const results = await Promise.all(Array.from({ length: 12 }, () => bundled.loadBundledCodexCatalogAsync()));
   expect(results.every(value => value?.models[0]?.slug === "gpt-5.5")).toBe(true);
