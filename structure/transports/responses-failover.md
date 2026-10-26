@@ -22,6 +22,8 @@ without returning the source lease would block cap-one fallback and leak capacit
 `tests/responses/responses-compaction-recovery-policy.test.ts`,
 `tests/responses/responses-compaction-recovery.test.ts` and
 `tests/providers/kiro/kiro-leased-responses.test.ts` pin these boundaries.
+The routed compact collector and recovery preflight select SSE through the [internal media-type contract](inventory.md#internal-response-media-types).
+Header casing and parameters preserve opaque compact output and eligible recovery dispatch, covered by `tests/responses/reasoning-retention-routing.test.ts` and `tests/responses/responses-compaction-recovery.test.ts`.
 
 Retry, replay, and combo failover on the Responses data plane: upstream reset retry, the
 ambiguous-resend gate and replay boundary, combo quota fallback and commit boundaries, compaction

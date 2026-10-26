@@ -390,6 +390,16 @@ is refused by name rather than surfaced as bytes no caller can read. Buffered de
 bodies stop at 32 MiB; event streams may continue beyond that while decoded bytes stay within
 the greater of 32 MiB or 128 times the coded bytes consumed, so highly compressed bombs stop.
 
+## Internal response media types
+
+`src/lib/http-response-semantics.ts` compares the exact Content-Type type/subtype
+case-insensitively, ignoring surrounding whitespace and semicolon parameters. The internal JEV
+decision invoker, routed compact collector, and compaction recovery preflight use this rule to
+select SSE decoding. `Text/Event-Stream; charset=UTF-8` selects the event-stream path; a different
+subtype or a parameter that merely mentions `text/event-stream` does not. Response headers and
+body bytes retain their original values. The JEV, reasoning-retention routing, and compaction
+recovery suites cover the resulting decision, opaque compact output, and recovery dispatch.
+
 ## Raw transport null-body statuses
 
 `src/lib/http-response-semantics.ts` holds the null-body status set both raw outbound transports
