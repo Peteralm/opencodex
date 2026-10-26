@@ -9,9 +9,10 @@ import { npmInvocation } from "../update/npm-invocation.mjs";
 import { CODEX_CLI_TRANSPORT_ENV_KEYS } from "../update/codex-cli-update-launch-policy.mjs";
 import { CODEX_CLI_REGISTRY, isSha512Integrity, codexCliArtifactSetAsync, codexCliArtifactSetDigest, type CodexCliArtifactSet } from "./cli-update-artifacts";
 export { CODEX_CLI_REGISTRY } from "./cli-update-artifacts";
-import { windowsCodexCliPlanEvidence, withWindowsCodexCliPlanToolchain } from "./cli-windows-plan-provenance";
+import { windowsCodexCliPlanEvidence, windowsCodexCliToolchainDigest, withWindowsCodexCliPlanToolchain } from "./cli-windows-plan-provenance";
 import { windowsCliApplyPrefixSupported } from "./cli-update-job-store-windows";
 import { windowsInstallNamespaceSupported } from "./cli-update-windows-observation";
+import { windowsNpmExecutionArgs } from "./windows-npm-execution";
 import {
   inspectCodexCliInstall,
   type CodexCliInstallKind,
@@ -158,6 +159,7 @@ export function codexCliUpdatePlanId(bound: {
   readonly targetVersion: string;
   readonly targetIntegrity: string;
   readonly targetArtifactsDigest?: string;
+  readonly toolchainDigest?: string;
 }): string {
   // Ordered pairs, not object key order: the digest must not depend on how a caller
   // happened to build the record.
@@ -176,6 +178,7 @@ export function codexCliUpdatePlanId(bound: {
   const hash = createHash("sha256");
   for (const [key, value] of fields) hash.update(`${key}=${value}\n`);
   if (bound.targetArtifactsDigest) hash.update(`targetArtifactsDigest=${bound.targetArtifactsDigest}\n`);
+  if (bound.toolchainDigest) hash.update(`toolchainDigest=${bound.toolchainDigest}\n`);
   return hash.digest("hex").slice(0, PLAN_ID_LENGTH);
 }
 
@@ -538,7 +541,7 @@ export async function resolveCodexCliUpdateArtifactTarget(channel: CodexCliUpdat
     const query = async (spec: string) => {
       const args = isolatedNpmArgs(["view", spec, "--json"], isolation!);
       const invocation = windowsToolchain
-        ? { bin: windowsToolchain.node, args: [windowsToolchain.npmCli, ...args], options: { cwd: isolation!.dir, env: isolation!.env } }
+        ? { bin: windowsToolchain.node, args: windowsNpmExecutionArgs(windowsToolchain.npmCli, args), options: { cwd: isolation!.dir, env: isolation!.env } }
         : isolatedNpmTarget(["view", spec, "--json"], isolation!);
       if (!invocation) throw new Error("npm unavailable");
       const result = await spawn(invocation.bin, invocation.args, { encoding: "utf8", timeout: REGISTRY_TIMEOUT_MS,
@@ -700,6 +703,7 @@ export async function createCodexCliUpdatePlan(deps: CodexCliUpdatePlanDeps = {}
       targetVersion: target.version,
       targetIntegrity: target.integrity,
       targetArtifactsDigest: target.artifacts ? codexCliArtifactSetDigest(target.artifacts) : undefined,
+      toolchainDigest: windowsCodexCliToolchainDigest(report),
     }),
     provenance: report.provenance,
     managed: report.managed,

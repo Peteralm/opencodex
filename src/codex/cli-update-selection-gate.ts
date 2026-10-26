@@ -18,12 +18,12 @@
  *   parent selection writers (runtime pin persist/clear, shim install/
  *   auto-restore/uninstall) and the two parent session-spawn paths (remote
  *   workspace child, desktop relaunch). FREE -> WORKER_COMMIT is taken by the
- *   update worker for only its short final window. Writers report busy rather
+ *   update worker through installer settlement and post-install readback. Writers report busy rather
  *   than wait: Windows final ACL/content observations may be slow; a parent writer
  *   must never park the event loop behind it. The gate is intentionally one
  *   cell for the whole process rather than per-configDir: alias/junction/case
  *   spellings of the same target must not split the exclusion, so a writer on
- *   a different configDir can also see a brief busy.
+ *   a different configDir can also see busy until installation settles.
  *
  * This module claims nothing about processes it does not own: an external
  * installer, a late descendant of an earlier child, or an OS snapshot race
@@ -52,7 +52,7 @@ let selectionGate: SharedArrayBuffer | null = null;
 
 /** The single process-wide gate cell. Both realms wrap it in an Int32Array. */
 export function codexCliUpdateSelectionGate(): SharedArrayBuffer {
-  selectionGate ??= new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  selectionGate ??= new SharedArrayBuffer(3 * Int32Array.BYTES_PER_ELEMENT);
   return selectionGate;
 }
 
@@ -111,10 +111,12 @@ export function beginCodexCliSelectionParentWrite(): CodexCliSelectionParentWrit
 }
 
 /**
- * The worker's short final window. tryEnter covers the uncontended same-turn
+ * The worker's installation window. tryEnter covers the uncontended same-turn
  * case; waitEnter is the bounded retry for a held parent write. commit() is
  * the fence CAS issued in the same event-loop turn as the installer start call;
- * exit() releases the gate once the spawn call has returned.
+ * exit() releases only after proven termination and post-install readback.
+ * Unknown child lifetime retains exclusion. Slots 1/2 bind owner/generation;
+ * one-word legacy fixtures have no parent recovery authority.
  */
 export interface CodexCliUpdateCommitWindow {
   tryEnter(): boolean;
@@ -126,6 +128,7 @@ export interface CodexCliUpdateCommitWindow {
 export function createWorkerCommitWindow(options: {
   readonly gate: SharedArrayBuffer;
   readonly fence: SharedArrayBuffer;
+  readonly generation?: number;
   readonly deadlineMs?: number;
   /** Test seam: observe/back-off without real sleeps. */
   readonly sleep?: (ms: number) => Promise<void>;
@@ -135,12 +138,19 @@ export function createWorkerCommitWindow(options: {
   const deadlineMs = options.deadlineMs ?? WORKER_COMMIT_WAIT_DEADLINE_MS;
   const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
   const cancelled = () => Atomics.load(fence, 0) === CODEX_CLI_UPDATE_FENCE_CANCELLED;
+  const generation = options.generation ?? reserveCodexCliInstallationGeneration(options.gate);
+  if (!Number.isInteger(generation) || generation <= 0 || generation > 0x7fffffff) throw new Error("invalid_installation_generation");
+  const enter = () => {
+    if (Atomics.compareExchange(gate, 0, CODEX_CLI_UPDATE_GATE_FREE, -generation)
+      !== CODEX_CLI_UPDATE_GATE_FREE) return false;
+    if (gate.length >= 3) Atomics.store(gate, 1, generation);
+    Atomics.store(gate, 0, CODEX_CLI_UPDATE_GATE_WORKER_COMMIT);
+    return true;
+  };
   let held = false;
   return Object.freeze({
     tryEnter() {
-      if (!held
-        && Atomics.compareExchange(gate, 0, CODEX_CLI_UPDATE_GATE_FREE, CODEX_CLI_UPDATE_GATE_WORKER_COMMIT)
-          === CODEX_CLI_UPDATE_GATE_FREE) {
+      if (!held && enter()) {
         held = true;
       }
       return held;
@@ -148,8 +158,7 @@ export function createWorkerCommitWindow(options: {
     async waitEnter() {
       const deadline = Date.now() + deadlineMs;
       while (!held && !cancelled()) {
-        if (Atomics.compareExchange(gate, 0, CODEX_CLI_UPDATE_GATE_FREE, CODEX_CLI_UPDATE_GATE_WORKER_COMMIT)
-          === CODEX_CLI_UPDATE_GATE_FREE) {
+        if (enter()) {
           held = true;
           break;
         }
@@ -165,7 +174,45 @@ export function createWorkerCommitWindow(options: {
     exit() {
       if (!held) return;
       held = false;
-      Atomics.store(gate, 0, CODEX_CLI_UPDATE_GATE_FREE);
+      releaseCodexCliInstallationGeneration(options.gate, generation);
     },
   });
+}
+
+/** Process-wide monotonic owner token; never reuse a wrapped generation. */
+export function reserveCodexCliInstallationGeneration(buffer: SharedArrayBuffer): number {
+  const view = new Int32Array(buffer);
+  if (view.length < 3) return 1; // Legacy isolated fixture, no recovery.
+  for (;;) {
+    const previous = Atomics.load(view, 2);
+    if (previous < 0 || previous === 0x7fffffff) throw new Error("installation_generation_exhausted");
+    if (Atomics.compareExchange(view, 2, previous, previous + 1) === previous) return previous + 1;
+  }
+}
+
+function releaseCodexCliInstallationGeneration(buffer: SharedArrayBuffer, generation: number): boolean {
+  const view = new Int32Array(buffer);
+  if (view.length >= 3 && Atomics.load(view, 1) !== generation) return false;
+  if (Atomics.compareExchange(view, 0, CODEX_CLI_UPDATE_GATE_WORKER_COMMIT, -generation)
+    !== CODEX_CLI_UPDATE_GATE_WORKER_COMMIT) return false;
+  if (view.length >= 3) Atomics.store(view, 1, 0);
+  Atomics.store(view, 0, CODEX_CLI_UPDATE_GATE_FREE);
+  return true;
+}
+
+/** Parent recovery is limited to an observed dead Worker that never won commit.
+ * COMMITTED is irrevocable: death/timeout/PID absence cannot establish child death.
+ * A surviving worker releases its own generation only after native Job settlement.
+ */
+export function recoverCodexCliInstallationAfterWorkerClose(buffer: SharedArrayBuffer,
+  fence: SharedArrayBuffer, generation: number): boolean {
+  if (buffer.byteLength < 12 || Atomics.load(new Int32Array(fence), 0) === CODEX_CLI_UPDATE_FENCE_COMMITTED) return false;
+  const view = new Int32Array(buffer);
+  // Worker death can land between gate reservation and owner publication, or
+  // midway through release. The reserved negative word is itself exact ownership.
+  if (Atomics.load(view, 0) === -generation) {
+    Atomics.store(view, 1, 0);
+    return Atomics.compareExchange(view, 0, -generation, CODEX_CLI_UPDATE_GATE_FREE) === -generation;
+  }
+  return releaseCodexCliInstallationGeneration(buffer, generation);
 }

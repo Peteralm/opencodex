@@ -100,6 +100,17 @@ rebuilds private evidence through the native inspector inside that realm before 
 owned fixture metadata. It does not establish compiled-worker or Windows ARM64 support.
 Metadata queries use the observed Node/npm paths under freshly matching held handles,
 the existing isolated npm configuration/cache, and the pinned registry. No installer runs.
+Before metadata executes, `openWindowsCliToolchainAuthority` in `src/codex/cli-update-job-store-windows.ts`
+opens the complete npm package tree with reparse-refusing relative handles and verifies every owner
+and ACL under the prefix's write-private policy. Node and module lookup directories are held too.
+ACL reads use handle-normalized long paths, including for 8.3 input spellings. A bounded whole-tree
+content/identity digest enters the plan ID; post-approval module drift changes that ID. Apply retains
+the execution authority through pack, install and version verification, including unknown lifetimes.
+The bounds are 8,192 entries, 128 MiB per file and 512 MiB total; unsupported authority refuses execution.
+`src/codex/windows-npm-execution.ts` installs an argv-bound synchronous Node resolution hook before
+npm's entrypoint. Both CommonJS and ESM may load only builtins and files within the held npm tree;
+ancestor/global fallback, including a later-created volume-root node_modules, refuses before module
+execution. Node versions without synchronous hooks fail closed. Executable-local DLLs are pinned too.
 A completed Windows plan has a deterministic ID. Only the bounded x64 prefix predicate below
 may set `applicable: true`; other observed layouts retain `windows_apply_disabled`.
 Active/unknown sessions still refuse earlier. Apply never overrides a refused plan.
@@ -349,8 +360,15 @@ its own lock-acquisition failure — cannot slip inside the window). Writers nev
 POSIX window spans the final process scan through its installer-spawn call. The Windows window also
 renews full authority ACL/identity, inspector and full scoped preimage after acquisition, then performs
 the final process scan, synchronous held-identity/selection/cancellation checks, CAS and synchronous
-native Create/Assign/Resume with no intervening await. It releases immediately after start returns or
-throws, before any native wait or setup cleanup. Windows ACL/content observations can take substantial
+native Create/Assign/Resume with no intervening await. Windows retains the gate through native Job
+settlement, post-install readback and version verification. Unknown child lifetime keeps exclusion.
+The process-wide gate carries an owner generation; stale release cannot free a later owner.
+Observed Worker close recovers that generation only if its fence never committed to a spawn.
+Committed Worker death, PID absence and timeout cannot establish installer termination.
+Explicit `recoverWindowsCodexCliInstallations` uses retained original process/Job handles, then
+readback before releasing exclusion; terminal proof survives a transient readback failure for retry.
+Failed toolchain pin disposal remains strongly retained and surfaces cleanup uncertainty.
+Windows ACL/content observations can take substantial
 time; neither a short held window nor a hard I/O deadline is claimed. Acquisition's 30s deadline does
 not bound time held. A synchronous
 parent writer must not park the event loop behind it, so a held gate is an immediate busy. The gate is

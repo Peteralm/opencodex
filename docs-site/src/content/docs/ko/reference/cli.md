@@ -19,6 +19,8 @@ opencodex CLI는 `ocx`입니다. 첫 번째 명령 이름으로 분기하며, `s
 
 `check`는 레지스트리를 조회하거나 Codex를 실행하지 않습니다. POSIX에서는 배포 런처가 캡처한 환경 후보와 런타임 리졸버가 선택한 정규 경로가 같으면 `selectionAttested: true`가 될 수 있습니다. 연결된 npm-global 패키지 매니페스트가 소유권을 증명하고, 후보 버전이 보고된 경우 그 버전이 매니페스트 버전과 일치하면 `managed: true`가 될 수 있으며 저장된 후보는 인증되지 않습니다. Windows x64는 증명에 바인딩된 절대 표준 npm `codex.cmd`와 보유 핸들로 바인딩된 Node/npm 도구체인(있으면 프리픽스 로컬, 없다고 확인되면 런처 아키텍처에 고정된 캡처된 PATH 쌍), 검증된 인프리픽스 플랫폼 백킹도 지원하며 reparse를 거부하는 보유 핸들을 사용합니다. 다른 Windows 레이아웃은 계속 연기되거나 관리되지 않습니다. Windows의 `managed` 결과는 관측된 설치 레이아웃만 분류하며, 바인딩된 Node/npm은 업데이터의 읽기 전용 메타데이터 도구체인일 뿐 이후 `codex.cmd` 호출이 어떤 인터프리터를 해석할지를 보증하지 않습니다. 검증된 ACL 경로와 관찰 한도 안의 공유 prefix에서는 명시적 apply를 허용하고, 무관한 패키지·shim의 바이트와 신원 보존을 확인하며, prefix 관찰 한도는 4,096항목·총 512 MiB·파일당 384 MiB입니다. 지원하지 않는 경로와 ARM64는 거절합니다. 직접 Bun/소스 실행은 런처 증거가 없어 후보를 신뢰하지 않습니다. `plan`은 격리된 임시 npm 설정·캐시·로그로 공식 레지스트리를 조회하고 활성 세션이나 불완전한 프로세스 관측을 거절합니다. 설치하거나 프로세스에 신호를 보내지 않습니다. 적용 조건을 충족하지 않는 Windows 설치는 `applicable: false`와 `refusal: windows_apply_disabled`를 가진 결정적 읽기 전용 plan을 생성하며, PATH 전용 선택·OpenCodex 자동 시작 래퍼·global/vendor 폴백은 계속 연기됩니다. [명령과 거절 사유의 전체 설명(영문)](/reference/cli/agents/#read-only-codex-cli-update-plan)을 참고하세요.
 
+Windows plan은 npm 패키지 전체와 모듈 조회 경로의 쓰기 권한도 검증합니다. 선택된 Node는 동기 모듈 훅을 지원해야 하며, npm은 검증된 트리 밖의 의존성을 실행할 수 없습니다. Apply는 설치 프로세스 종료와 readback까지 선택 변경과 소유 세션 시작을 busy로 거절하고, 자식 수명이 불명확하면 이 배제를 유지합니다.
+
 Windows x64 설치 관측은 [`attest` 명령](/ko/reference/cli/agents/)을 참조하세요. 명시적 경로 없이 증명에 바인딩된 런처 스냅샷이 식별한 선택 후보를 관측하며, 업데이트 권한이나 런타임 선택을 증명하지 않습니다.
 
 뜻이 분명하면 `list`나 `status`가 기본입니다. 구조화된 스냅샷은 `--json`을, 스트리밍 요청 로그 피드는 `ocx observe logs --follow --jsonl`을 사용합니다. 테마, 언어, 내비게이션처럼 순수하게 시각적인 브라우저 상태에는 CLI 대응이 없습니다. Cloudflare Tunnel 설정은 이 명령 집합 밖입니다.

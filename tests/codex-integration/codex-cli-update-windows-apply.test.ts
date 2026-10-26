@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, renameSync, symlinkSync, unlinkSync, linkSync } from "node:fs";
+import { cpSync, realpathSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, renameSync, symlinkSync, unlinkSync, linkSync } from "node:fs";
 import { join, dirname, parse } from "node:path";
 import { applyCodexCliUpdate } from "../../src/codex/cli-update-apply";
 import { createCodexCliUpdatePlan } from "../../src/codex/cli-update-plan";
@@ -16,7 +16,13 @@ import { runCodexCliUpdateJobWork } from "../../src/codex/cli-update-job-executi
 import { startWindowsCliChild, type WindowsCliChild } from "../../src/codex/windows-cli-child";
 import { windowsInstallNamespaceSupported } from "../../src/codex/cli-update-windows-observation";
 import { createCodexCliUpdateFence, cancelCodexCliUpdateFence, createWorkerCommitWindow,
-  codexCliUpdateIsCancelled } from "../../src/codex/cli-update-selection-gate";
+  codexCliUpdateIsCancelled, codexCliUpdateSelectionGate, resetCodexCliSelectionGatesForTests } from "../../src/codex/cli-update-selection-gate";
+import { installCodexShim } from "../../src/codex/shim";
+import { clearPersistedCodexRuntime } from "../../src/codex/runtime";
+import { restartCodexDesktopApp } from "../../src/codex/desktop-app-restart";
+import { recoverWindowsCodexCliInstallations } from "../../src/codex/cli-update-windows-apply";
+import { windowsNpmExecutionArgs } from "../../src/codex/windows-npm-execution";
+import { CodexRemoteWorkspaceRuntimeFactory, RemoteWorkspaceCoordinator } from "../../src/remote-control";
 
 const native = process.platform === "win32" && process.arch === "x64" ? test : test.skip;
 const roots: string[] = [];
@@ -112,7 +118,10 @@ async function fixture(executable?: Buffer, onCreated?: (root: string) => void) 
   for (const [relative, bytes] of Object.entries(old.backingFiles)) write(join(prefix, backingRoot, relative), bytes);
   const shims = JSON.parse(readFileSync(fixturePath("codex-windows-npm-shims.json"), "utf8"));
   for (const [name, bytes] of Object.entries(shims.files)) write(join(prefix, name), String(bytes));
-  const nodeDir = join(process.env.ProgramFiles ?? "C:/Program Files", "nodejs");
+  const sourceNode = realpathSync(Bun.which("node.exe")!);
+  const nodeDir = join(root, "nodejs"); mkdirSync(nodeDir);
+  copyFileSync(sourceNode, join(nodeDir, "node.exe"));
+  cpSync(join(dirname(sourceNode), "node_modules", "npm"), join(nodeDir, "node_modules", "npm"), { recursive: true });
   const inspectionDeps = { env: { CODEX_CLI_PATH: join(prefix, "codex.cmd"), PATH: nodeDir, PATHEXT: ".EXE;.CMD" },
     configDir: join(root, "absent-home"), arch: "x64" as const, selectionAttested: true };
   const deps = { platform: "win32" as const, inspectionDeps,
@@ -178,11 +187,13 @@ native("Windows apply holds distinct prefix lease and private staging, then rele
   settleOwnership(); // Only fully verified cleanup releases afterEach/preload ownership.
 }, 60000);
 
-native("Windows native installer starts under commit CAS and frees gate before native wait", async () => {
+native("Windows paused installer excludes real runtime selection and shim callers through readback", async () => {
+  resetCodexCliSelectionGatesForTests();
   const f = await fixture(undefined, root => liveFixtureRoots.add(root)), id = await approved(f);
-  const fence = createCodexCliUpdateFence(), gate = new SharedArrayBuffer(4);
+  const fence = createCodexCliUpdateFence(), gate = codexCliUpdateSelectionGate();
+  const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
   let starts = 0, retained = 0;
-  const result = await applyCodexCliUpdate(id, { ...f.deps,
+  const applying = applyCodexCliUpdate(id, { ...f.deps,
     commitWindow: createWorkerCommitWindow({ gate, fence }),
     retainExecution: () => { retained++; return { release() { retained--; } }; },
     startWindowsChild: invocation => {
@@ -193,16 +204,115 @@ native("Windows native installer starts under commit CAS and frees gate before n
       }
       const child = startWindowsCliChild(invocation);
       const wait = child.wait.bind(child);
-      child.wait = () => {
-        expect(Atomics.load(new Int32Array(gate), 0)).toBe(0);
+      child.wait = async () => {
+        if (invocation.policy === "installer") { paused.resolve(); await resume.promise; }
         return wait();
       };
       return child;
     },
   });
+  await paused.promise;
+  let assertionError: unknown;
+  try {
+    expect(installCodexShim()).toMatchObject({ installed: false, refused: true, message: "codex_cli_selection_busy" });
+    expect(() => clearPersistedCodexRuntime({ configDir: f.deps.inspectionDeps.configDir }))
+      .toThrow("codex_cli_selection_busy");
+    expect(restartCodexDesktopApp({ execFile: () => { throw new Error("busy must precede OS calls"); } }))
+      .toMatchObject({ attempted: false, relaunch: "skipped", reason: "selection_mutation_busy" });
+    const factory = new CodexRemoteWorkspaceRuntimeFactory({ command: [process.execPath, repoPath("tests", "fake-codex-server.ts")] });
+    await expect(factory.start({ sessionId: "paused-installer", deviceId: "fixture", deviceName: "Fixture",
+      rootId: "fixture", rootLabel: "Fixture", capabilities: ["workspace.read"], tools: ["read_file"],
+      coordinator: new RemoteWorkspaceCoordinator({ isOnline: () => true, async invoke() { return { ok: true }; } }),
+      emit() {} })).rejects.toThrow("codex_cli_selection_busy");
+  } catch (error) { assertionError = error; } finally { resume.resolve(); }
+  const result = await applying;
   if (!result.leaseRetained) liveFixtureRoots.delete(f.root);
+  if (assertionError) throw assertionError;
   expect(result).toMatchObject({ outcome: "applied", reason: "verified_target", leaseRetained: false });
   expect(starts).toBe(1); expect(retained).toBe(0);
+  expect(Atomics.load(new Int32Array(gate), 0)).toBe(0);
+}, 60_000);
+
+native("Windows plan refuses an npm required module writable by Everyone before metadata executes", async () => {
+  const f = await fixture();
+  const module = join(f.deps.inspectionDeps.env.PATH, "node_modules/npm/lib/cli.js");
+  const grant = await spawnTestChild([join(process.env.SystemRoot!, "System32/icacls.exe"), module, "/grant", "*S-1-1-0:(M)"],
+    { cwd: f.root, env: process.env, deadlineMs: 10_000 });
+  expect(grant.exitCode).toBe(0);
+  let executed = 0;
+  const plan = await createCodexCliUpdatePlan({ ...f.deps, resolveTarget: () => { executed++; return f.deps.resolveTarget(); } });
+  expect(plan.applicable).toBe(false);
+  expect(executed).toBe(0);
+}, 60_000);
+
+native("Windows approved plan binds npm library bytes and held authority refuses module replacement", async () => {
+  const f = await fixture(), id = await approved(f);
+  const module = join(f.deps.inspectionDeps.env.PATH, "node_modules/npm/lib/cli.js");
+  const report = await inspectCodexCliInstall({ ...f.deps.inspectionDeps, observeInstallContent: true });
+  const held = await holdWindowsCodexCliPlanToolchain(report);
+  expect(held).not.toBeNull();
+  try { await Promise.resolve(); expect(() => writeFileSync(module, "replacement")).toThrow(); }
+  finally { expect(await held!.release()).toBe(true); }
+  writeFileSync(module, readFileSync(module, "utf8") + "\n// changed after approval\n");
+  expect((await createCodexCliUpdatePlan(f.deps)).planId).not.toBe(id);
+  let starts = 0;
+  expect(await applyCodexCliUpdate(id, { ...f.deps, install: async () => { starts++; return { terminal: true, exitCode: 0 }; } }))
+    .toMatchObject({ outcome: "refused", reason: "plan_changed", leaseRetained: false });
+  expect(starts).toBe(0);
+}, 60_000);
+
+native("Windows unknown native installer retains admission until original Job termination proves recovery", async () => {
+  resetCodexCliSelectionGatesForTests();
+  const f = await fixture(undefined, root => liveFixtureRoots.add(root)), id = await approved(f);
+  const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence();
+  let child: WindowsCliChild | undefined, terminal = false, failReadback = false;
+  const result = await applyCodexCliUpdate(id, { ...f.deps, commitWindow: createWorkerCommitWindow({ gate, fence }),
+    inspect: deps => { if (failReadback) { failReadback = false; throw new Error("transient readback"); }
+      return inspectCodexCliInstall(deps); },
+    startWindowsChild: invocation => {
+      const started = startWindowsCliChild(invocation);
+      if (invocation.policy === "installer") {
+        child = started;
+        const observe = started.observe.bind(started);
+        started.observe = () => terminal ? observe() : { terminal: false, exitCode: null, unknown: true };
+      }
+      return started;
+    } });
+  expect(result).toMatchObject({ outcome: "ambiguous", leaseRetained: true, reason: "installer_state_unknown" });
+  expect(installCodexShim()).toMatchObject({ refused: true, message: "codex_cli_selection_busy" });
+  expect(await recoverWindowsCodexCliInstallations()).toBe(0);
+  terminal = true;
+  // Original native Job/process owner is the only termination proof, never a delay or PID probe.
+  expect((await child!.wait()).terminal).toBe(true);
+  failReadback = true;
+  expect(await recoverWindowsCodexCliInstallations()).toBe(0);
+  expect(installCodexShim()).toMatchObject({ refused: true, message: "codex_cli_selection_busy" });
+  expect(await recoverWindowsCodexCliInstallations()).toBe(1);
+  expect(Atomics.load(new Int32Array(gate), 0)).toBe(0);
+  expect(result.leaseRetained).toBe(true); // Earlier receipt remains honest about its own observation.
+  liveFixtureRoots.delete(f.root);
+}, 60_000);
+
+native("Windows npm execution refuses ancestor CommonJS and ESM modules outside its held tree", async () => {
+  const f = await fixture(), tools = f.deps.inspectionDeps.env.PATH;
+  const npmCli = join(tools, "node_modules/npm/bin/npm-cli.js");
+  const marker = join(f.root, "outside-executed");
+  write(join(tools, "node_modules/npm/lib/owned.js"), 'module.exports="inside";');
+  write(npmCli, 'console.log(require("../lib/owned.js"));');
+  const positive = startWindowsCliChild({ executable: join(tools, "node.exe"), args: windowsNpmExecutionArgs(npmCli, []),
+    cwd: f.root, env: { SystemRoot: process.env.SystemRoot }, policy: "pack" });
+  expect(await positive.wait()).toMatchObject({ terminal: true, cleanupComplete: true, exitCode: 0, stdout: "inside\n" });
+  write(join(tools, "node_modules", "external", "package.json"), JSON.stringify({ name: "external", main: "index.js", exports: "./index.js" }));
+  write(join(tools, "node_modules", "external", "index.js"), `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "bad");`);
+  for (const source of ['require("external");', 'import("external");']) {
+    write(npmCli, source);
+    const child = startWindowsCliChild({ executable: join(tools, "node.exe"), args: windowsNpmExecutionArgs(npmCli, []),
+      cwd: f.root, env: { SystemRoot: process.env.SystemRoot }, policy: "pack" });
+    const result = await child.wait();
+    expect(result.terminal && result.cleanupComplete).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  }
 }, 60_000);
 
 native("a fresh Worker runs real offline Windows FFI install and closes only after native settlement", async () => {

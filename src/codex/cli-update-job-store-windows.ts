@@ -54,9 +54,9 @@
  * behavior is unverified: the DACL policy is the enforcement claim, not an
  * empirical cross-user proof.
  */
-import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import type { Library, Symbols } from "bun:ffi";
 import { getConfigDir } from "../config";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
@@ -75,6 +75,7 @@ const KERNEL_SYMBOLS = {
   GetFileInformationByHandleEx: { args: ["u64", "i32", "ptr", "u32"], returns: "i32" },
   SetFileInformationByHandle: { args: ["u64", "i32", "ptr", "u32"], returns: "i32" },
   GetFileType: { args: ["u64"], returns: "u32" },
+  GetFinalPathNameByHandleW: { args: ["u64", "ptr", "u32", "u32"], returns: "u32" },
   ReadFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
   SetFilePointerEx: { args: ["u64", "i64", "ptr", "u32"], returns: "i32" },
   FlushFileBuffers: { args: ["u64"], returns: "i32" },
@@ -188,6 +189,12 @@ export class WindowsApplyAcquisition {
     return true;
   }
 }
+
+export class WindowsCliToolchainCleanupError extends Error {
+  constructor(readonly acquisition: WindowsApplyAcquisition) { super("toolchain_cleanup_unverified"); }
+}
+// Failed native closes remain strongly owned even when acquisition rejects.
+const retainedToolchains = new Set<WindowsApplyAcquisition>();
 
 interface Prepared {
   readonly config: string;
@@ -729,6 +736,84 @@ export async function openWindowsCliApplyAuthority(prefix: string, acquire: bool
 export async function windowsCliApplyPrefixSupported(prefix: string): Promise<boolean> {
   try { const guard = await openWindowsCliApplyAuthority(prefix, false); return await guard.release(); }
   catch { return false; }
+}
+
+/** Read-only execution authority: use the same reparse-refusing relative opens and
+ * owner/DACL policy as installation authority. No existing object is rehardened.
+ * Canonical handle paths make ACL reads identical for long and 8.3 spellings.
+ */
+export async function openWindowsCliToolchainAuthority(node: string, npmRoot: string, content: boolean) {
+  const { ffi, kernel, nt } = await loadNative();
+  const pins = new WindowsApplyAuthorityPins(), ctx: Ctx = { ffi, kernel, nt, pins };
+  const acquisition = new WindowsApplyAcquisition(ctx, pins);
+  retainedToolchains.add(acquisition);
+  let transferred = false, closed = false, total = 0;
+  const entries: WindowsAclEntry[] = [], observations: unknown[] = [];
+  const canonical = (handle: bigint): string => {
+    const buffer = Buffer.alloc(32768 * 2);
+    const length = kernel.symbols.GetFinalPathNameByHandleW(handle, ffi.ptr(buffer), 32768, 0);
+    if (!length || length >= 32768) throw unsafe();
+    const path = buffer.toString("utf16le", 0, length * 2);
+    if (!/^\\\\\?\\[a-z]:\\/i.test(path)) throw unsafe();
+    return path.slice(4);
+  };
+  const add = (handle: bigint, directory: boolean, policy: WindowsAclEntry["policy"]) => {
+    const identity = inspect(ctx, handle, directory), path = canonical(handle);
+    entries.push({ path, directory, policy });
+    if (entries.length > 8192) throw unsafe();
+    if (!directory) {
+      total += identity.size;
+      if (identity.links !== 1 || identity.size > 128 * 1024 * 1024 || total > 512 * 1024 * 1024) throw unsafe();
+      observations.push([path.toLowerCase(), identity, content ? createHash("sha256").update(readAll(ctx, handle, identity.size)).digest("hex") : ""]);
+    } else observations.push([path.toLowerCase(), identity.volumeSerial, identity.fileId]);
+    return path;
+  };
+  try {
+    const nodeParent = pinChain(ctx, resolve(node, ".."), ACCESS_READ);
+    for (const entry of nodeParent) add(entry.handle, true, "trusted-ancestry");
+    const parent = nodeParent.at(-1); if (!parent) throw unsafe();
+    // Node's own directory is a module/DLL lookup directory, so broad create grants
+    // are forbidden here even when an administrator owns it.
+    entries[entries.length - 1] = { path: canonical(parent.handle), directory: true, policy: "write-private" };
+    add(relOpen(ctx, parent.handle, basename(node), false, ACCESS_READ, SHARE_LEAF), false, "write-private");
+    // Executable-local DLL search happens before the JS resolver guard starts.
+    for (const entry of readdirSync(canonical(parent.handle))) if (/\.dll$/i.test(entry)) {
+      add(relOpen(ctx, parent.handle, entry, false, ACCESS_READ, SHARE_LEAF), false, "write-private");
+    }
+    const npmChain = pinChain(ctx, npmRoot, ACCESS_READ);
+    for (const entry of npmChain) add(entry.handle, true,
+      canonical(entry.handle).length >= canonical(parent.handle).length ? "write-private" : "trusted-ancestry");
+    const walk = (handle: bigint) => {
+      const path = canonical(handle);
+      for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        // relOpen + inspect rejects reparse points and all unexpected object kinds.
+        const directory = entry.isDirectory();
+        const child = relOpen(ctx, handle, entry.name, directory, ACCESS_READ, SHARE_LEAF);
+        add(child, directory, "write-private");
+        if (directory) walk(child);
+      }
+    };
+    walk(npmChain.at(-1)!.handle);
+    // Hold each existing ancestor module lookup directory; absent names are checked
+    // again under the already pinned, ACL-confined parents on every acquisition.
+    for (const entry of npmChain.slice(0, -1)) {
+      try { add(relOpen(ctx, entry.handle, "node_modules", true, ACCESS_READ, SHARE_DIR), true, "write-private"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    for (let i = 0; i < entries.length; i += 512) await verifyAcl(entries.slice(i, i + 512));
+    const digest = createHash("sha256").update(JSON.stringify(observations)).digest("hex");
+    transferred = true;
+    return { digest, async release(): Promise<boolean> {
+      if (closed) return false; closed = true;
+      pins.closeAll(kernel);
+      if (pins.remaining) throw new WindowsCliToolchainCleanupError(acquisition);
+      retainedToolchains.delete(acquisition); return true;
+    } };
+  } finally { if (!transferred) {
+    pins.closeAll(kernel);
+    if (pins.remaining) throw new WindowsCliToolchainCleanupError(acquisition);
+    retainedToolchains.delete(acquisition);
+  } }
 }
 
 /**

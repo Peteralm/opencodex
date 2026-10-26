@@ -39,6 +39,7 @@ import {
   cancelCodexCliUpdateFence,
   codexCliUpdateSelectionGate,
   createCodexCliUpdateFence,
+  reserveCodexCliInstallationGeneration, recoverCodexCliInstallationAfterWorkerClose,
 } from "./cli-update-selection-gate";
 import type { CodexCliUpdateWorkerReply, CodexCliUpdateWorkerRunMessage } from "./cli-update-worker";
 
@@ -53,6 +54,15 @@ interface LiveJobRecord {
 }
 
 const liveJobs = new Map<string, LiveJobRecord>();
+const recoveryJobs = new Map<string, () => void>();
+/** Explicit reconciliation request; only the original Worker can observe its
+ * original native Job. This never reruns apply or changes the earlier receipt.
+ */
+export function recoverCodexCliUpdateWorkerJob(jobId: string): boolean {
+  const recover = recoveryJobs.get(jobId);
+  if (!recover) return false;
+  recover(); return true;
+}
 const unjoinedWorkers = new Set<Worker>();
 let unjoinedWorkerClosedTotal = 0;
 
@@ -82,7 +92,7 @@ export function codexCliUpdateUnjoinedWorkerClosedTotal(): number {
 
 /**
  * Operator-facing snapshot for diagnosing a held selection gate. The gate
- * cell is one Int32 word with no owner field, so this reports CORRELATION
+ * state projection omits the internal owner/generation words, so this reports CORRELATION
  * evidence only: which update jobs are in flight here and whether each
  * Worker's close was actually observed. A job listed beside a worker_commit
  * gate is a candidate holder, never a proven one; an empty list beside a
@@ -248,6 +258,8 @@ function dispatchWorker(
     worker.addEventListener("messageerror", () => unsettled());
     worker.addEventListener("close", () => {
       state.closed = true;
+      if (message.installationGeneration !== undefined) recoverCodexCliInstallationAfterWorkerClose(
+        message.gate, message.fence, message.installationGeneration);
       if (grace) clearTimeout(grace);
       // One close handler decides everything: a stored valid reply wins, any
       // other close — before a reply, or after only implausible traffic — is
@@ -291,6 +303,7 @@ async function runInWorker(
   const jobId = options.jobId ?? randomUUID();
   const requestId = randomUUID();
   const fence = createCodexCliUpdateFence();
+  const installationGeneration = reserveCodexCliInstallationGeneration(codexCliUpdateSelectionGate());
   const snapshot = options.snapshot !== undefined
     ? options.snapshot
     : trustedNodeLauncherContext()?.codexCliInspectionEnv ?? null;
@@ -336,8 +349,14 @@ async function runInWorker(
       snapshot,
       gate: codexCliUpdateSelectionGate(),
       fence,
+      installationGeneration,
       ...(options.env ? { env: options.env } : {}),
     };
+    const recover = () => {
+      try { worker.postMessage({ type: "recover", requestId, jobId }); } catch { /* no terminal evidence */ }
+    };
+    recoveryJobs.set(jobId, recover);
+    worker.addEventListener("close", () => { if (recoveryJobs.get(jobId) === recover) recoveryJobs.delete(jobId); }, { once: true });
     return await dispatchWorker(worker, message, options, state);
   } finally {
     liveJobs.delete(jobId);

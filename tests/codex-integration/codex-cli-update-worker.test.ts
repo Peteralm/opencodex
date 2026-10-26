@@ -21,6 +21,7 @@ import {
   createCodexCliUpdateFence, cancelCodexCliUpdateFence, codexCliUpdateIsCancelled,
   codexCliUpdateSelectionGate, beginCodexCliSelectionParentWrite,
   createWorkerCommitWindow, resetCodexCliSelectionGatesForTests,
+  reserveCodexCliInstallationGeneration, recoverCodexCliInstallationAfterWorkerClose,
 } from "../../src/codex/cli-update-selection-gate";
 import { codexCliUpdateInspectionDepsFromSnapshot } from "../../src/codex/cli-update-inspection-context";
 import { removeTreeAfterBackgroundWork } from "../helpers/remove-tree";
@@ -172,6 +173,24 @@ afterEach(async () => {
   if (firstError !== undefined) throw firstError;
 });
 describe("process-wide selection commit gate and cancellation fence", () => {
+  test("only the dead pre-spawn owner's generation can recover installation admission", () => {
+    const gate = codexCliUpdateSelectionGate(), fence = createCodexCliUpdateFence();
+    const generation = reserveCodexCliInstallationGeneration(gate);
+    const old = createWorkerCommitWindow({ gate, fence, generation });
+    expect(old.tryEnter()).toBe(true);
+    expect(recoverCodexCliInstallationAfterWorkerClose(gate, fence, generation + 1)).toBe(false);
+    expect(recoverCodexCliInstallationAfterWorkerClose(gate, fence, generation)).toBe(true);
+    const nextFence = createCodexCliUpdateFence();
+    const next = createWorkerCommitWindow({ gate, fence: nextFence });
+    expect(next.tryEnter()).toBe(true);
+    old.exit(); // A stale worker cannot release the new installation owner.
+    expect(beginCodexCliSelectionParentWrite().entered).toBe(false);
+    expect(next.commit()).toBe(true);
+    expect(recoverCodexCliInstallationAfterWorkerClose(gate, nextFence, new Int32Array(gate)[1]!)).toBe(false);
+    next.exit(); // Native terminal + readback path owns release after COMMITTED.
+    const writer = beginCodexCliSelectionParentWrite();
+    expect(writer.entered).toBe(true); writer.exit();
+  });
   test("a rejected authority acquisition roots failed pins before any returned authority exists", () => {
     const pins = new WindowsApplyAuthorityPins();
     let fault = true, closes = 0, detached = 0;

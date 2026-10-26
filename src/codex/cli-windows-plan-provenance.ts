@@ -7,6 +7,7 @@ import { deriveCodexCliInstallationInput } from "./cli-installation-targets";
 import type { CodexCliInstallProvenanceDeps, CodexCliInstallReport } from "./cli-install-provenance";
 import { resolveCodexRuntime } from "./runtime";
 import { inspectWindowsInstallationFiles, type WindowsInstallationFilesResult } from "./windows-installation-files";
+import { openWindowsCliToolchainAuthority, WindowsCliToolchainCleanupError } from "./cli-update-job-store-windows";
 
 /** Private plan evidence. Explicit `attest` observations never enter this map. */
 interface WindowsPlanEvidence { readonly node: string; readonly npmCli: string; readonly arch: "x64" | "arm64";
@@ -14,6 +15,8 @@ interface WindowsPlanEvidence { readonly node: string; readonly npmCli: string; 
   readonly envPath: string | undefined; readonly envPathExt: string | undefined;
   readonly nodeEvidence: string; readonly npmEvidence: string }
 const evidence = new WeakMap<CodexCliInstallReport, WindowsPlanEvidence>();
+const toolchainDigests = new WeakMap<CodexCliInstallReport, string>();
+export const windowsCodexCliToolchainDigest = (report: CodexCliInstallReport): string | undefined => toolchainDigests.get(report);
 export const windowsCodexCliPlanEvidence = (report: CodexCliInstallReport): WindowsPlanEvidence | null => evidence.get(report) ?? null;
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 type File = Extract<WindowsInstallationFilesResult, { kind: "observed" }>["files"][number];
@@ -37,21 +40,29 @@ export async function withWindowsCodexCliPlanToolchain<R>(report: CodexCliInstal
   run: () => R): Promise<Awaited<R> | null> {
   const toolchain = evidence.get(report);
   if (!toolchain) return null;
+  let authority;
+  try { authority = await openWindowsCliToolchainAuthority(toolchain.node, win32.dirname(win32.dirname(toolchain.npmCli)), true); }
+  catch (error) { if (error instanceof WindowsCliToolchainCleanupError) throw error; return null; }
   let result: Awaited<R> | null = null;
-  const observed = await inspectWindowsInstallationFiles([
+  try { const observed = await inspectWindowsInstallationFiles([
     { path: toolchain.node, maxBytes: 128 * 1024 * 1024, hashOnly: true },
     { path: toolchain.npmCli, maxBytes: 256 * 1024 },
   ], async files => {
     if (id(files[0]!) !== toolchain.nodeEvidence || id(files[1]!) !== toolchain.npmEvidence) return false;
+    toolchainDigests.set(report, authority.digest);
     result = await run(); return true;
   });
   return observed.kind === "observed" ? result : null;
+  } finally { if (!await authority.release()) throw new Error("toolchain_release_unverified"); }
 }
 
 /** Transfer a held toolchain observation to a transaction, including unknown child lifetimes. */
 export async function holdWindowsCodexCliPlanToolchain(report: CodexCliInstallReport) {
   const toolchain = evidence.get(report);
   if (!toolchain) return null;
+  let authority;
+  try { authority = await openWindowsCliToolchainAuthority(toolchain.node, win32.dirname(win32.dirname(toolchain.npmCli)), true); }
+  catch (error) { if (error instanceof WindowsCliToolchainCleanupError) throw error; return null; }
   const admitted = Promise.withResolvers<boolean>();
   const release = Promise.withResolvers<void>();
   const observing = inspectWindowsInstallationFiles([
@@ -64,8 +75,9 @@ export async function holdWindowsCodexCliPlanToolchain(report: CodexCliInstallRe
     return true;
   });
   void observing.then(() => admitted.resolve(false), () => admitted.resolve(false));
-  if (!await admitted.promise) return null;
-  return { async release() { release.resolve(); return (await observing).kind === "observed"; } };
+  if (!await admitted.promise) { await authority.release(); return null; }
+  return { async release() { release.resolve(); const observed = await observing;
+    return await authority.release() && observed.kind === "observed"; } };
 }
 const json = (file: File): Record<string, unknown> | null => {
   try { const item = JSON.parse(Buffer.from(file.bytes).toString("utf8"));

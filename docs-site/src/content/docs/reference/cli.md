@@ -170,6 +170,10 @@ No software is installed and no process is signalled. Windows x64 apply requires
 prefix with verified private write authority and preserves unrelated packages and shims; unsupported observed layouts return
 `applicable: false` and `refusal: windows_apply_disabled`.
 PATH-only selection and OpenCodex autostart wrappers remain deferred.
+Windows planning also requires trusted write authority over npm's complete package tree and module
+lookup directories. Apply keeps selection changes and owned session starts busy through installer
+termination and readback; an unknown child lifetime keeps that exclusion in place.
+The selected Node must support synchronous module hooks; npm cannot load dependencies outside its verified tree.
 See [planning details](/reference/cli/agents/#read-only-codex-cli-update-plan).
 
 For a reviewed applicable npm-global plan, `ocx system codex-cli-update apply --plan-id <id> --yes`

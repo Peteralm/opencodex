@@ -34,7 +34,7 @@ if (Bun.isMainThread === false) {
           if (installing && (Atomics.load(view, 0) !== 2 || Atomics.load(word, 0) !== 2)) throw new Error("native start outside commit");
           const child = startWindowsCliChild(invocation), wait = child.wait.bind(child);
           child.wait = async () => {
-            if (Atomics.load(view, 0) !== 0) throw new Error("gate held during native wait");
+            if (Atomics.load(view, 0) !== 2) throw new Error("installation exclusion lost during native wait");
             const result = await wait();
             nativeSettlements.push({ terminal: result.terminal, cleanupComplete: result.cleanupComplete });
             return result;

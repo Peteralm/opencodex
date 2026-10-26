@@ -26,6 +26,8 @@ import {
   type CodexCliUpdateInspectionSnapshot,
 } from "./cli-update-inspection-context";
 import { codexCliUpdateIsCancelled, createWorkerCommitWindow } from "./cli-update-selection-gate";
+import { recoverWindowsCodexCliInstallations } from "./cli-update-windows-apply";
+import { WindowsCliToolchainCleanupError } from "./cli-update-job-store-windows";
 
 export interface CodexCliUpdateWorkerRunMessage {
   readonly type: "run";
@@ -40,6 +42,7 @@ export interface CodexCliUpdateWorkerRunMessage {
   readonly gate: SharedArrayBuffer;
   /** Per-job cancel/commit fence cell. */
   readonly fence: SharedArrayBuffer;
+  readonly installationGeneration?: number;
   /** Env snapshot: a Worker may not observe parent mutations on every platform. */
   readonly env?: { readonly CODEX_HOME?: string; readonly OPENCODEX_HOME?: string };
 }
@@ -86,6 +89,7 @@ declare const self: Worker;
 // apply at its first checkpoint via signal.aborted.
 const applyAbort = new AbortController();
 let ran = false;
+let runIdentity: { requestId: string; jobId: string } | undefined;
 // A raw Win32 handle is not a Bun event-loop reference. Keep the run-once
 // handler AND exact resource roots until their terminal cleanup releases them.
 export function createCodexCliWorkerLifetime(detach: () => void) {
@@ -112,6 +116,13 @@ if (typeof Bun !== "undefined" && Bun.isMainThread === false
   self.onmessage = async (event: MessageEvent<unknown>) => {
     const data = event.data;
     if (data && typeof data === "object" && !Array.isArray(data)
+      && (data as { type?: unknown }).type === "recover"
+      && runIdentity && (data as { requestId?: unknown }).requestId === runIdentity.requestId
+      && (data as { jobId?: unknown }).jobId === runIdentity.jobId) {
+      await recoverWindowsCodexCliInstallations();
+      return;
+    }
+    if (data && typeof data === "object" && !Array.isArray(data)
       && (data as CodexCliUpdateWorkerCancelMessage).type === "cancel") {
       applyAbort.abort();
       return;
@@ -119,6 +130,7 @@ if (typeof Bun !== "undefined" && Bun.isMainThread === false
     if (ran || !isRunMessage(data)) return;
     ran = true;
     const message = data;
+    runIdentity = { requestId: message.requestId, jobId: message.jobId };
     try {
       // Home overrides apply before anything resolves a home-derived path in
       // this realm; they are transport for the job, never snapshot fields.
@@ -140,7 +152,7 @@ if (typeof Bun !== "undefined" && Bun.isMainThread === false
           inspectionDeps,
           signal: applyAbort.signal,
           isCancelled: codexCliUpdateIsCancelled(message.fence),
-          commitWindow: createWorkerCommitWindow({ gate: message.gate, fence: message.fence }),
+          commitWindow: createWorkerCommitWindow({ gate: message.gate, fence: message.fence, generation: message.installationGeneration }),
           retainExecution: owner => lifetime.retain(owner),
         });
         self.postMessage({
@@ -149,6 +161,7 @@ if (typeof Bun !== "undefined" && Bun.isMainThread === false
         } satisfies CodexCliUpdateWorkerReply);
       }
     } catch (error) {
+      if (error instanceof WindowsCliToolchainCleanupError) lifetime.retain(error.acquisition);
       self.postMessage({
         type: "error", requestId: message.requestId, jobId: message.jobId,
         message: error instanceof Error ? error.message : "cli_update_worker_failed",
