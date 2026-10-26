@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { expandUserPath } from "../config";
+import { clearableDeadline, type ClearableDeadline } from "../lib/abort";
 import { parseCatalogJson, readCodexCatalogPathForHome, type RawCatalog, type RawEntry } from "./catalog/parsing";
 import {
   CodexExecTrustError,
@@ -435,12 +436,21 @@ type SharedPromptProbeOutcome =
   | { kind: "failed"; failure?: PromptProbeFailure }
   | { kind: "busy" };
 
+/**
+ * The fixed phrase that distinguishes a deadline expiry from every other
+ * termination. The shared flight's timer and a caller's own deadline both
+ * report it, so a waiter can tell "the budget ran out" from "the probe was
+ * stopped" without reading process output - which this response never carries.
+ */
+const PROMPT_PROBE_TIMEOUT_PHRASE = "codex prompt probe timed out";
+
 let activePromptProbe: PromptProbeFlight | null = null;
 let probeCommandForTests: { binary: string; args: string[] } | null = null;
 let probeRuntimeForTests: { command: string; source: CodexRuntimeSource } | null | undefined;
 let probeSpawnAttemptsForTests = 0;
 let probeCloseBarrierForTests: Promise<void> | null = null;
 let probeExecBoundaryDepsForTests: CodexExecBoundaryAsyncDeps | null = null;
+let probeMetadataBarrierForTests: Promise<void> | null = null;
 
 function commandKey(command: ProbeCommand): string {
   return JSON.stringify([
@@ -568,7 +578,12 @@ function runProbe(
     failure = probeFailure(
       command,
       "execution-failed",
-      `codex probe was terminated: ${commandDescription(command)}`,
+      // The flight timer aborts with a TimeoutError; every other abort reason
+      // is a stop, not an expired budget. Callers match on the fixed phrase to
+      // report "timed out" instead of a generic termination.
+      signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
+        ? `${PROMPT_PROBE_TIMEOUT_PHRASE}: ${commandDescription(command)}`
+        : `codex probe was terminated: ${commandDescription(command)}`,
     ),
   ) => {
     if (settled || stopping) return;
@@ -909,6 +924,39 @@ export async function probePromptText(
   signal?: AbortSignal,
   promptStateFingerprint: string | null = null,
 ): Promise<PromptTextProbe> {
+  // Metadata time counts against the caller budget; synchronous reads cannot
+  // be interrupted, so expiry blocks admission after they return. Waiting and
+  // trust verification are cancellable. The flight keeps its fixed deadline:
+  // caller expiry ends only that wait, without extending the shared backstop.
+  // The child also stops on output overflow, process errors or last-waiter exit.
+  const deadlineAt = Date.now() + timeoutMs;
+  const deadline = clearableDeadline(timeoutMs, signal);
+  try {
+    const result = await probePromptTextWithinDeadline(timeoutMs, deadlineAt, deadline, promptStateFingerprint);
+    if (!deadline.didExpire()) return result;
+    const command = `${result.runtime?.command ?? "codex"} debug prompt-input`;
+    return {
+      ...result,
+      ok: false,
+      detail: "prompt probe timed out",
+      failure: {
+        kind: "execution-failed",
+        command,
+        detail: `${PROMPT_PROBE_TIMEOUT_PHRASE}: ${command}`,
+      },
+    };
+  } finally {
+    deadline.clear();
+  }
+}
+
+async function probePromptTextWithinDeadline(
+  timeoutMs: number,
+  deadlineAt: number,
+  deadline: ClearableDeadline,
+  promptStateFingerprint: string | null,
+): Promise<PromptTextProbe> {
+  const signal = deadline.signal;
   // The probe runs in CODEX_HOME, never in a caller-supplied directory. A `cwd`
   // parameter let an authenticated request read any readable folder's AGENTS.md,
   // and it also described a prompt that depends on where Codex happened to run.
@@ -976,6 +1024,37 @@ export async function probePromptText(
     timeoutMs,
     promptStateFingerprint,
   };
+  // The absolute check complements the abort signal: a synchronous metadata
+  // read that consumed the whole budget starves the timer callback, so the
+  // signal can still be quiet here after the absolute deadline passed. An
+  // expired caller must never start a flight.
+  const metadataBarrier = probeMetadataBarrierForTests;
+  if (metadataBarrier) await metadataBarrier;
+  if (signal.aborted && !deadline.didExpire()) {
+    return {
+      ok: false,
+      codexHome,
+      layers: { ...baseLayers },
+      base,
+      ...(reportedRuntime ? { runtime: reportedRuntime } : {}),
+      detail: "prompt probe cancelled",
+    };
+  }
+  if (deadline.didExpire() || Date.now() >= deadlineAt) {
+    return {
+      ok: false,
+      codexHome,
+      layers: { ...baseLayers },
+      base,
+      ...(reportedRuntime ? { runtime: reportedRuntime } : {}),
+      detail: "prompt probe timed out",
+      failure: probeFailure(
+        command,
+        "execution-failed",
+        `${PROMPT_PROBE_TIMEOUT_PHRASE}: ${commandDescription(command)}`,
+      ),
+    };
+  }
   const outcome = await runSharedPromptProbe(command, signal);
   if (outcome.kind !== "output") {
     return {
@@ -989,7 +1068,9 @@ export async function probePromptText(
         ? "prompt probe cancelled"
         : outcome.kind === "busy"
           ? "another prompt probe is still finishing; retry shortly"
-          : "codex debug prompt-input failed",
+          : outcome.kind === "failed" && outcome.failure?.detail.startsWith(PROMPT_PROBE_TIMEOUT_PHRASE)
+            ? "prompt probe timed out"
+            : "codex debug prompt-input failed",
     };
   }
   const raw = outcome.raw;
@@ -1064,6 +1145,11 @@ export function setPromptTextProbeCloseBarrierForTests(barrier: Promise<void> | 
   probeCloseBarrierForTests = barrier;
 }
 
+/** Test-only metadata-phase barrier; models elapsed work before flight admission. */
+export function setPromptTextProbeMetadataBarrierForTests(barrier: Promise<void> | null): void {
+  probeMetadataBarrierForTests = barrier;
+}
+
 /** Test-only exec-boundary dep seam; production resolves the real environment. */
 export function setPromptTextProbeExecBoundaryDepsForTests(deps: CodexExecBoundaryAsyncDeps | null): void {
   probeExecBoundaryDepsForTests = deps;
@@ -1086,4 +1172,5 @@ export async function resetPromptTextProbeForTests(): Promise<void> {
   probeSpawnAttemptsForTests = 0;
   probeCloseBarrierForTests = null;
   probeExecBoundaryDepsForTests = null;
+  probeMetadataBarrierForTests = null;
 }

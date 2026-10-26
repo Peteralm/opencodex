@@ -1744,7 +1744,8 @@ describe("cli surface", () => {
     process.env.OPENCODEX_HOME = mkdtempSync(join(tmpdir(), "ocx-cli-config-"));
     const logs: string[] = [];
     const deps = {
-      featuresInvocation: (action: "enable" | "disable") => ({ file: "codex", args: ["features", action, "multi_agent_v2"], options: {} }),
+      // This state-transition fixture supplies both invocation and execution.
+      featuresInvocation: (action: "enable" | "disable") => ({ file: "fixture-codex", args: ["features", action, "multi_agent_v2"], options: {} }),
       execFile: (_file: string, args: string[]) => {
         // POSIX: ["features", "enable|disable", ...]; win32 .cmd: ["/d","/s","/c","...enable..."]
         const joined = args.join(" ");
