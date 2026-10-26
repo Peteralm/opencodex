@@ -1,4 +1,5 @@
 {
+  "fix-tool-number-preservation.test.ts": "adapters",
   "cursor-native-grep-globs.test.ts": "providers/cursor",
   "tool-identity-hash.test.ts": "adapters",
   "eventstream-fragmentation.test.ts": "responses",

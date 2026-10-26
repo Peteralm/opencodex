@@ -240,7 +240,14 @@ export function coerceIntegerToolArguments(
   if (!/\d/.test(args)) return args;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(args);
+    let unsafeNumber = false;
+    parsed = JSON.parse(args, (_key, value: unknown) => {
+      if (typeof value === "number" && (!Number.isFinite(value)
+        || (Number.isInteger(value) && !Number.isSafeInteger(value)))) unsafeNumber = true;
+      return value;
+    });
+    // Re-serializing even one repaired field also serializes every untouched sibling.
+    if (unsafeNumber) return args;
   } catch {
     // Malformed or still-streaming arguments are not this function's problem; the
     // existing paths already handle them.

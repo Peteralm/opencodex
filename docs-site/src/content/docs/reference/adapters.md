@@ -826,3 +826,5 @@ For the official DeepSeek Chat Completions endpoint, opencodex relaxes regex and
 schema-validation HTTP 400 errors. Strict mode is omitted for this tool. Fields
 defined only inside an `anyOf` are no longer constrained by that union; the tool
 must validate its inputs. Other tools and providers retain their existing behavior.
+
+Tool argument repair preserves the original argument string when it contains an unsafe integer or an overflowing number, even if another field could be repaired. This avoids silently changing an unrelated identifier.
