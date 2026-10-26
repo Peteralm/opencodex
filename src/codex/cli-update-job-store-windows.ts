@@ -222,6 +222,9 @@ interface Ctx {
 }
 
 const wide = (text: string): Buffer => Buffer.from(text + "\0", "utf16le");
+// OBJECT_ATTRIBUTES contains unmanaged pointers to UNICODE_STRING and its text.
+// Root every backing buffer through NtCreateFile, including across GC/JIT pressure.
+const activeRelativeOpenBuffers = new Set<Buffer>();
 
 function keep(ctx: Ctx, handle: bigint): bigint {
   if (handle === 0n || handle === INVALID_HANDLE) throw unsafe();
@@ -267,25 +270,29 @@ function relOpen(
 ): bigint {
   const name = wide(component);
   const unicode = Buffer.alloc(16);
+  const attributes = Buffer.alloc(48);
+  const output = Buffer.alloc(8);
+  const status = Buffer.alloc(16);
+  const borrowed = [name, unicode, attributes, output, status];
+  for (const buffer of borrowed) activeRelativeOpenBuffers.add(buffer);
+  try {
   unicode.writeUInt16LE(name.length - 2, 0);
   unicode.writeUInt16LE(name.length, 2);
   unicode.writeBigUInt64LE(BigInt(ctx.ffi.ptr(name)), 8);
-  const attributes = Buffer.alloc(48);
   attributes.writeUInt32LE(48, 0);
   attributes.writeBigUInt64LE(parent, 8);
   attributes.writeBigUInt64LE(BigInt(ctx.ffi.ptr(unicode)), 16);
   attributes.writeUInt32LE(0x40, 24); // OBJ_CASE_INSENSITIVE; one component only.
-  const output = Buffer.alloc(8);
-  const status = Buffer.alloc(16);
   const result = ctx.nt.symbols.NtCreateFile!(ctx.ffi.ptr(output), access, ctx.ffi.ptr(attributes),
     ctx.ffi.ptr(status), null, 0, share, FILE_OPEN, directory ? DIR_OPTIONS : FILE_OPTIONS, null, 0);
   if (result < 0) {
     const status32 = result >>> 0;
     if (status32 === 0xc0000034 || status32 === 0xc000003a) throw enoent(); // object/path not found
-    throw unsafe();
+    throw new Error("unsafe_store", { cause: { nativeStatus: status32 } });
   }
   const handle = keep(ctx, output.readBigUInt64LE(0));
   return handle;
+  } finally { for (const buffer of borrowed) activeRelativeOpenBuffers.delete(buffer); }
 }
 
 /** Volume root via the strict GUID mount path; remote or absent volumes refuse. */

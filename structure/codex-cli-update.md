@@ -368,6 +368,8 @@ Committed Worker death, PID absence and timeout cannot establish installer termi
 Explicit `recoverWindowsCodexCliInstallations` uses retained original process/Job handles, then
 readback before releasing exclusion; terminal proof survives a transient readback failure for retry.
 Failed toolchain pin disposal remains strongly retained and surfaces cleanup uncertainty.
+Handle-relative opens root every backing buffer reachable through OBJECT_ATTRIBUTES until
+NtCreateFile returns, including its nested Unicode string and text, across allocation/GC pressure.
 Windows ACL/content observations can take substantial
 time; neither a short held window nor a hard I/O deadline is claimed. Acquisition's 30s deadline does
 not bound time held. A synchronous
