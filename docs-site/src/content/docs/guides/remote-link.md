@@ -185,7 +185,7 @@ Home-initiated connections now restart the Child after saving its connection, in
 
 ### Windows computers
 
-A Windows x64 Child needs OpenSSH Server, Windows PowerShell and the standalone `ocx.exe`. Home recognizes Windows during the probe, records it with the link, and runs every Child command through PowerShell over the same pinned SSH connection, whether the SSH default shell is cmd or PowerShell. The link key still travels only on standard input. Closing the SSH connection ends the remote `ocx` command. If Home cannot tell which platform the Child runs, it stops before issuing a link key.
+A Windows x64 Child needs OpenSSH Server, Windows PowerShell and the standalone `ocx.exe`. Home recognizes Windows during the probe, records it with the link, and runs every Child command through PowerShell over the same pinned SSH connection, whether the SSH default shell is cmd or PowerShell. The link key still travels only on standard input. Closing the SSH connection ends the remote `ocx` command. If Windows PowerShell on the Child cannot load the helper that ties `ocx.exe` to the connection, for example under Constrained Language Mode, the command is refused and nothing runs. If Home cannot tell which platform the Child runs, it stops before issuing a link key.
 
 Run `ocx link cleanup` on Home to inspect recorded Child platforms without changing them. Current Home releases disconnect Windows Children through PowerShell. If a remote disconnect fails, resolve the reported shell or installation error and retry; **Remove here only** remains an explicit recovery action that can leave the Child needing a local disconnect.
 

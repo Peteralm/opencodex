@@ -19,7 +19,7 @@
  */
 
 import { isAbsolute } from "node:path";
-import { windowsOcxArgv } from "./remote-windows";
+import { POWERSHELL_ENCODED_MAX, windowsOcxArgv } from "./remote-windows";
 
 export type TunnelDirection = "R" | "L";
 
@@ -225,7 +225,7 @@ export function buildResolveArgv(alias: string): string[] {
 export function quoteRemote(argv: readonly string[]): string {
   if (argv[0] === "powershell.exe") {
     if (argv.length !== 6 || argv.slice(1, 5).join(" ") !== "-NoLogo -NoProfile -NonInteractive -EncodedCommand"
-      || !/^[A-Za-z0-9+/]+={0,2}$/.test(argv[5] ?? "") || (argv[5]?.length ?? 0) > 7_600) {
+      || !/^[A-Za-z0-9+/]+={0,2}$/.test(argv[5] ?? "") || (argv[5]?.length ?? 0) > POWERSHELL_ENCODED_MAX) {
       throw new LinkSshArgumentError("invalid encoded PowerShell command");
     }
     return argv.join(" ");

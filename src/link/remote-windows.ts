@@ -1,7 +1,10 @@
 import { Buffer } from "node:buffer";
 
-/** cmd.exe caps a command line at 8191 characters; the encoded script must leave room for the argv. */
-export const POWERSHELL_ENCODED_MAX = 7_600;
+/**
+ * cmd.exe, Windows OpenSSH's default shell, caps its command line at 8191 characters. The encoded
+ * script leaves room for the fixed powershell.exe prefix and cmd.exe's own wrapper.
+ */
+export const POWERSHELL_ENCODED_MAX = 8_000;
 
 export function powershellArgv(script: string): string[] {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
@@ -9,38 +12,39 @@ export function powershellArgv(script: string): string[] {
   return ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
 }
 
+/** Exit status when the remote ocx cannot be contained; nothing ran. */
+export const WINDOWS_CONTAINMENT_EXIT = 126;
+
 /**
- * Starts one native process with CRT-quoted arguments and inherited standard handles, so stdin
- * bytes reach it untouched and its exit status becomes the host's. The process joins a job that
- * is killed when the PowerShell host's last handle closes, so a dropped SSH channel cannot leave
- * the remote ocx running; silent breakaway leaves any runtime that ocx itself starts alone.
+ * OcxJob, compiled with Add-Type, contains the remote ocx. Run creates it suspended, assigns it to
+ * a Job with kill-on-close and silent breakaway, and only then resumes it, so it never runs outside
+ * the Job: when the SSH server ends a dropped channel by terminating this PowerShell host, the
+ * Job's last handle closes and ocx.exe dies with it, while a runtime ocx starts on its own breaks
+ * away and survives. Standard handles are inherited, so stdin bytes reach ocx untouched, and its
+ * exit status becomes the host's. If Add-Type, the Job, the suspended start, the assignment or the
+ * resume fails, the child is killed before it runs and the host exits 126; there is no uncontained
+ * fallback. Ok is the bounded --version probe for discovery. Layouts are x64: STARTUPINFOW is 104
+ * bytes and LimitFlags sits at byte 16 of the 144-byte JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
+ * Warnings fail Add-Type in Windows PowerShell, so this source must compile without any.
  */
-const NATIVE_PROCESS = String.raw`
-$ErrorActionPreference='Stop'
+const OCX_JOB = "using System;using System.Text;using System.Diagnostics;using System.Runtime.InteropServices;public static class OcxJob{[DllImport(\"kernel32\")]static extern IntPtr CreateJobObjectW(IntPtr a,IntPtr n);[DllImport(\"kernel32\")]static extern bool SetInformationJobObject(IntPtr j,int c,byte[] i,int l);[DllImport(\"kernel32\",CharSet=CharSet.Unicode)]static extern bool CreateProcessW(string a,StringBuilder c,IntPtr p,IntPtr t,bool h,int f,IntPtr e,string d,long[] s,long[] i);[DllImport(\"kernel32\")]static extern bool AssignProcessToJobObject(IntPtr j,IntPtr p);[DllImport(\"kernel32\")]static extern int ResumeThread(IntPtr t);static IntPtr Z=IntPtr.Zero;static void F(bool k){if(!k)throw new Exception();}public static bool Ok(string x){try{var q=Process.Start(new ProcessStartInfo(x,\"--version\"){UseShellExecute=false,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true});q.StandardInput.Close();q.StandardOutput.ReadToEndAsync();q.StandardError.ReadToEndAsync();if(q.WaitForExit(10000))return q.ExitCode==0;q.Kill();}catch{}return false;}public static int Run(string x,string c){var j=CreateJobObjectW(Z,Z);var l=new byte[144];l[17]=48;F(j!=Z&&SetInformationJobObject(j,9,l,144));var s=new long[13];s[0]=104;var i=new long[3];F(CreateProcessW(x,new StringBuilder(c),Z,Z,true,4,Z,null,s,i));var p=Process.GetProcessById((int)i[2]);F(p.Handle!=Z);if(!AssignProcessToJobObject(j,new IntPtr(i[0]))||ResumeThread(new IntPtr(i[1]))<0){p.Kill();F(false);}p.WaitForExit();return p.ExitCode;}}";
+
+const NATIVE_PROCESS = String.raw`$ErrorActionPreference='Stop'
+function Fail{[Console]::Error.WriteLine('Refusing to run ocx.exe outside a kill-on-close job.');exit 126}
+try{Add-Type '` + OCX_JOB + String.raw`'}catch{Fail}
 function Quote-Native([string]$v){'"'+[regex]::Replace([regex]::Replace($v,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'}
-function New-KillJob{try{Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class OcxJob{[DllImport("kernel32.dll")]public static extern IntPtr CreateJobObject(IntPtr a,string n);[DllImport("kernel32.dll")]public static extern bool SetInformationJobObject(IntPtr j,int c,byte[] i,int l);[DllImport("kernel32.dll")]public static extern bool AssignProcessToJobObject(IntPtr j,IntPtr p);}'
-$j=[OcxJob]::CreateJobObject([IntPtr]::Zero,$null);$i=New-Object byte[] 144;$i[17]=0x30
-if($j -ne [IntPtr]::Zero -and [OcxJob]::SetInformationJobObject($j,9,$i,144)){return $j}}catch{};[IntPtr]::Zero}
-function Invoke-Native([string]$exe,[string[]]$arguments){$job=New-KillJob
-$s=New-Object Diagnostics.ProcessStartInfo;$s.FileName=$exe;$s.UseShellExecute=$false
-$s.Arguments=(($arguments|ForEach-Object{Quote-Native $_}) -join ' ')
-$p=[Diagnostics.Process]::Start($s)
-if($job -ne [IntPtr]::Zero){[void][OcxJob]::AssignProcessToJobObject($job,$p.Handle)}
-$p.WaitForExit();exit $p.ExitCode}
-function Read-Data([string]$b){[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))|ConvertFrom-Json}
+function Invoke-Native([string]$e,[string[]]$a){try{$c=[OcxJob]::Run($e,((@($e)+$a|%{Quote-Native $_}) -join ' '))}catch{Fail};exit $c}
 `;
 
-function encodedData(value: { executable?: string; args: readonly string[] }): string {
+function dataLine(value: { executable?: string; args: readonly string[] }): string {
   if ([value.executable ?? "", ...value.args].some(item => item.includes("\0"))) throw new Error("Remote argument contains NUL");
   // An object wrapper: Windows PowerShell 5.1 emits a top-level JSON array unenumerated.
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
+  const data = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
+  return `$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'))|ConvertFrom-Json\n`;
 }
 
 export function windowsNativeArgv(executable: string, args: readonly string[]): string[] {
-  const data = encodedData({ executable, args });
-  return powershellArgv(NATIVE_PROCESS + `$d=Read-Data '${data}'
-Invoke-Native $d.executable @($d.args)
-`);
+  return powershellArgv(NATIVE_PROCESS + dataLine({ executable, args }) + "Invoke-Native $d.executable @($d.args)\n");
 }
 
 /**
@@ -48,21 +52,12 @@ Invoke-Native $d.executable @($d.args)
  * must answer --version within ten seconds; only the selected one runs the real command.
  */
 export function windowsOcxArgv(args: readonly string[]): string[] {
-  const data = encodedData({ args });
-  return powershellArgv(NATIVE_PROCESS + `$d=Read-Data '${data}'
-$u=$env:USERPROFILE;$c=@((Join-Path $u '.opencodex-desktop/bin/ocx.exe'),(Join-Path $u '.local/share/goat/opencodex/current/ocx.exe'),(Join-Path $u '.local/bin/ocx.exe'))
-if($env:LOCALAPPDATA){$c+=Join-Path $env:LOCALAPPDATA 'Programs/OpenCodex/ocx.exe'}
-if($env:ProgramFiles){$c+=Join-Path $env:ProgramFiles 'OpenCodex/ocx.exe'}
-$c+=@(Get-Command ocx.exe -CommandType Application -ErrorAction SilentlyContinue|ForEach-Object{$_.Source})
-foreach($x in ($c|Select-Object -Unique)){if(-not [IO.File]::Exists($x)){continue}
-$s=New-Object Diagnostics.ProcessStartInfo;$s.FileName=$x;$s.Arguments='--version';$s.UseShellExecute=$false
-$s.RedirectStandardInput=$true;$s.RedirectStandardOutput=$true;$s.RedirectStandardError=$true
-try{$q=[Diagnostics.Process]::Start($s);$q.StandardInput.Close();[void]$q.StandardOutput.ReadToEndAsync();[void]$q.StandardError.ReadToEndAsync()
-if(-not $q.WaitForExit(10000)){$q.Kill();$q.WaitForExit();continue}
-if($q.ExitCode -ne 0){continue}}catch{continue}
-Invoke-Native $x @($d.args)}
-[Console]::Error.WriteLine('No runnable standalone ocx.exe found; install the Windows standalone archive in a supported location.')
-exit 127
+  return powershellArgv(NATIVE_PROCESS + dataLine({ args }) + String.raw`$u=$env:USERPROFILE;$c=@("$u\.opencodex-desktop\bin\ocx.exe","$u\.local\share\goat\opencodex\current\ocx.exe","$u\.local\bin\ocx.exe")
+if($env:LOCALAPPDATA){$c+="$env:LOCALAPPDATA\Programs\OpenCodex\ocx.exe"}
+if($env:ProgramFiles){$c+="$env:ProgramFiles\OpenCodex\ocx.exe"}
+$c+=@((Get-Command ocx.exe -Type Application -EA 0).Source)
+foreach($x in ($c|select -Unique)){if([IO.File]::Exists($x)-and[OcxJob]::Ok($x)){Invoke-Native $x @($d.args)}}
+[Console]::Error.WriteLine('No runnable ocx.exe found; install the Windows standalone archive.');exit 127
 `);
 }
 

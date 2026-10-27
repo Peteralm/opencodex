@@ -206,3 +206,50 @@ test.skipIf(process.platform !== "win32")("closing the SSH channel terminates th
   while (alive() && performance.now() < deadline) await Bun.sleep(25);
   expect(alive()).toBe(false);
 }, SPAWN_BUDGET_MS);
+
+test.skipIf(process.platform !== "win32")("a Windows ocx that cannot be contained in a kill-on-close job is refused before it runs", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ocx-windows-refuse-")); roots.push(home);
+  const marker = join(home, "ran");
+  const script = join(home, "mark.ts");
+  writeFileSync(script, "require('node:fs').writeFileSync(process.argv[2], 'ran');");
+  // Constrained Language Mode blocks Add-Type, so the Job helper cannot exist.
+  const env = { ...process.env, __PSLockdownPolicy: "4" };
+  const mode = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$ExecutionContext.SessionState.LanguageMode"], { env, stdout: "pipe", stderr: "pipe" });
+  expect(mode.stdout.toString().trim()).toBe("ConstrainedLanguage");
+  const child = Bun.spawn(windowsNativeArgv(process.execPath, [script, marker]), { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const code = await child.exited;
+  expect(code).not.toBe(0);
+  expect(existsSync(marker)).toBe(false);
+}, SPAWN_BUDGET_MS);
+
+// Required native release gate: set OCX_WINDOWS_OPENSSH_FIXTURE to a key-authenticated SSH alias of a
+// disposable Windows x64 OpenSSH host (cmd.exe or PowerShell default shell). Never a real user host.
+const OPENSSH_FIXTURE = process.env.OCX_WINDOWS_OPENSSH_FIXTURE;
+test.skipIf(!OPENSSH_FIXTURE)("dropping a real OpenSSH channel kills the contained remote process", async () => {
+  const alias = OPENSSH_FIXTURE!;
+  const ssh = (argv: string[]) => ["ssh", "-o", "BatchMode=yes", "--", alias, quoteRemote(argv)];
+  const remote = async (script: string) => {
+    const child = Bun.spawn(ssh(powershellArgv(script)), { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [stdout] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+    return stdout.trim();
+  };
+  const pidFile = "$env:TEMP\\ocx-job-fixture.pid";
+  await remote(`Remove-Item "${pidFile}" -EA 0`);
+  const held = Bun.spawn(ssh(windowsNativeArgv("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    ["-NoProfile", "-Command", `$PID|Set-Content "${pidFile}";Start-Sleep 600`])), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+  const deadline = performance.now() + 60_000;
+  let pid = "";
+  while (!/^\d+$/.test(pid) && performance.now() < deadline) {
+    pid = await remote(`Get-Content "${pidFile}" -EA 0`);
+    if (!/^\d+$/.test(pid)) await Bun.sleep(500);
+  }
+  expect(pid).toMatch(/^\d+$/);
+  held.kill();
+  await held.exited;
+  let state = "alive";
+  while (state !== "gone" && performance.now() < deadline) {
+    state = await remote(`if(Get-Process -Id ${pid} -EA 0){'alive'}else{'gone'}`);
+    if (state !== "gone") await Bun.sleep(500);
+  }
+  expect(state).toBe("gone");
+}, 90_000);
