@@ -62,6 +62,10 @@ describe("tool argument numeric preservation", () => {
     expect(coerceIntegerToolArguments('{"count":1.0,"value":"9007199254740993"}', schema))
       .toBe('{"count":1,"value":"9007199254740993"}');
   });
+  test("keeps unrepaired non-integral decimals in their original text", () => {
+    expect(coerceIntegerToolArguments('{"count":1.0,"amount":0.12345678901234567890,"ratio":1.50,"big":1E2}', schema))
+      .toBe('{"count":1,"amount":0.12345678901234567890,"ratio":1.50,"big":100}');
+  });
   test.each([false, true])("bridge preserves unsafe tokens and repairs siblings (stream=%s)", async stream => {
     const events: AdapterEvent[] = [
       { type: "tool_call_start", id: "call_1", name: "wait" },

@@ -263,9 +263,10 @@ function maskNumberTokens(json: string): { masked: string; numbers: Map<string, 
 /**
  * Repair integral floats in a tool-call arguments STRING against the tool's declared
  * parameter schema, and safe bare integers in string-only fields. When a repair is needed,
- * safe number tokens are serialized as before; unsafe integers and overflowing numbers remain
- * byte-identical, including in duplicate keys and nested arrays, while safe siblings
- * still get repaired. Strings, duplicate keys and surrounding formatting retain their bytes.
+ * safe integral number tokens are normalized as before; non-integral decimals, unsafe integers
+ * and overflowing numbers remain byte-identical, including in duplicate keys and nested arrays,
+ * while safe siblings still get repaired. Strings, duplicate keys and surrounding formatting
+ * retain their bytes.
  *
  * Returns the original string unchanged when there is no schema, the payload does not
  * parse, or nothing needed repair — so an unaffected call keeps its exact bytes and
@@ -299,9 +300,11 @@ export function coerceIntegerToolArguments(
   const chunks: string[] = [];
   let cursor = 0;
   for (const token of numbers.values()) {
+    // Unrepaired tokens are normalized only when that is lossless (a safe integral value such
+    // as 2.0), matching the previous re-serialization; any other decimal and every unsafe
+    // integer keeps its exact source text, so no unrepaired value is rounded.
     const number = Number(token.raw);
-    const safe = Number.isFinite(number) && (!Number.isInteger(number) || Number.isSafeInteger(number));
-    const replacement = token.replacement ?? (safe ? JSON.stringify(number) : token.raw);
+    const replacement = token.replacement ?? (Number.isSafeInteger(number) ? JSON.stringify(number) : token.raw);
     chunks.push(args.slice(cursor, token.start), replacement);
     cursor = token.start + token.raw.length;
   }

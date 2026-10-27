@@ -26,8 +26,8 @@ then turns the events into Responses SSE.
 ## Shared tool argument repair
 
 The bridge repairs integral floats in integer fields and safe bare integers in string-only
-fields against the tool's schema. Unsafe integers and overflowing numbers retain their exact
-tokens while safe siblings are still repaired. Nested arrays and duplicate keys retain every
+fields against the tool's schema. Unsafe integers, overflowing numbers and unrepaired non-integral
+decimals retain their exact tokens while safe siblings are still repaired. Nested arrays and duplicate keys retain every
 unsafe token, so repairing a timeout cannot silently change an unrelated identifier.
 
 ## External task input on translated Responses routes
