@@ -136,3 +136,40 @@ test("status reports the Child runtime's ready connection generation and omits i
     .toBeUndefined();
   expect(await collectLinkConnectionGeneration(null)).toBeUndefined();
 });
+
+/** A Home answering with a valid relay proof and, per mode, a bound, missing or mismatched generation. */
+function switchableHome(linkId: string) {
+  const state = { mode: "bound" as "bound" | "missing" | "invalid", generation: "fixture-home:1" };
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname !== LINK_RELAY_AUTH_PATH) return new Response(null, { status: 404 });
+    const nonce = url.searchParams.get("nonce")!;
+    const headers: Record<string, string> = { "x-opencodex-link-proof": linkRelayProof(fp, "listener", keyId, linkId, nonce)! };
+    if (state.mode !== "missing") {
+      headers[LINK_RELAY_CONNECTION_HEADER] = state.generation;
+      headers[LINK_RELAY_CONNECTION_PROOF_HEADER] = state.mode === "bound"
+        ? linkConnectionProof(fp, keyId, linkId, nonce, state.generation)!
+        : linkConnectionProof(fp, keyId, linkId, nonce, "fixture-home:other")!;
+    }
+    return new Response(null, { status: 204, headers });
+  } });
+  return { server, state };
+}
+
+for (const next of ["missing", "invalid"] as const) {
+  test(`a known Home generation becomes unknown when the next authenticated answer has a ${next} one`, async () => {
+    const linkId = next === "missing" ? "lnk_4444444444444444" : "lnk_5555555555555555";
+    const home = switchableHome(linkId);
+    try {
+      expect(await probeLinkRelayPreflight(target(home.server.port!, linkId))).toBe("ok");
+      expect(verifiedHomeConnection(linkId)).toBe("fixture-home:1");
+      home.state.mode = next;
+      home.state.generation = "fixture-home:2";
+      expect(await probeLinkRelayPreflight(target(home.server.port!, linkId))).toBe("ok");
+      expect(verifiedHomeConnection(linkId)).toBeUndefined();
+      home.state.mode = "bound";
+      expect(await probeLinkRelayPreflight(target(home.server.port!, linkId))).toBe("ok");
+      expect(verifiedHomeConnection(linkId)).toBe("fixture-home:2");
+    } finally { home.server.stop(true); }
+  });
+}

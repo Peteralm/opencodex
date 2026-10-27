@@ -12,7 +12,7 @@ import {
   LINK_RELAY_CONNECTION_PROOF_HEADER, LINK_RELAY_PROBE_HEADER, LINK_RELAY_SESSION_HEADER, linkConnectionProof,
   linkRelayChallenge, linkRelayProofMatches,
 } from "../link/relay-auth";
-import { recordVerifiedHomeConnection } from "./link-connection";
+import { forgetVerifiedHomeConnection, recordVerifiedHomeConnection } from "./link-connection";
 
 export interface BoundLinkRelayTarget {
   tunnelPort: number;
@@ -174,13 +174,20 @@ function relayChallenge(target: BoundLinkRelayTarget, origin: URL) {
   return { challenge, probe, headers: peerReport };
 }
 
-/** Keep the Home's connection generation only when its proof binds it to this nonce and key. */
+/**
+ * Called only after the Home's relay proof verified. Keep its connection generation when its own
+ * proof binds it to this nonce and key; otherwise the connection is unknown, never the old value.
+ */
 function noteHomeConnection(target: BoundLinkRelayTarget, nonce: string, headers: IncomingMessage["headers"]): void {
+  if (!target.linkId || !target.apiKeyId) return;
   const generation = headers[LINK_RELAY_CONNECTION_HEADER];
   const proof = headers[LINK_RELAY_CONNECTION_PROOF_HEADER];
-  if (typeof generation !== "string" || typeof proof !== "string" || !target.linkId || !target.apiKeyId) return;
-  const expected = linkConnectionProof(serviceApiTokenFingerprint(target.admissionKey), target.apiKeyId, target.linkId, nonce, generation);
-  if (linkRelayProofMatches(proof, expected)) recordVerifiedHomeConnection(target.linkId, generation);
+  const expected = typeof generation === "string"
+    ? linkConnectionProof(serviceApiTokenFingerprint(target.admissionKey), target.apiKeyId, target.linkId, nonce, generation)
+    : null;
+  if (typeof generation === "string" && typeof proof === "string" && linkRelayProofMatches(proof, expected)) {
+    recordVerifiedHomeConnection(target.linkId, generation);
+  } else forgetVerifiedHomeConnection(target.linkId);
 }
 
 /**
