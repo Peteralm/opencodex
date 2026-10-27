@@ -173,3 +173,38 @@ test("status never attests a snapshot that raced an OAuth publication, even whil
     }
   });
 });
+
+for (const reference of ["keychain:openai", "gcp-sa:openai/fixture-sa"] as const) {
+  for (const observedFirst of [true, false]) {
+    test(`an upgraded ${reference.split(":")[0]} reference stays counted after its provider loses it and deletion fails (${observedFirst ? "observer running" : "removed before any observer"})`, async () => {
+      await withLocalCredentialFixture(async f => {
+        const { getDefaultConfig, saveConfigPreservingClaudeCode } = await import("../../src/config");
+        const config = getDefaultConfig();
+        const provider = config.providers.openai;
+        if (!provider) throw new Error("Default config fixture requires the openai provider");
+        provider.apiKey = reference;
+        // Written before this release: no credential metadata knows the account yet.
+        f.put(join(f.home, "config.json"), config);
+        if (observedFirst) {
+          f.start();
+          expect((await f.inventory.collectLocalCredentials())?.count).toBe(1);
+        }
+        const keys = await import("../../src/providers/api-key-resolve");
+        keys.setProviderKeychainEntryFactoryForTests(() => ({
+          getPassword: () => "fixture-secret",
+          setPassword: () => {},
+          deletePassword: () => { throw new Error("fixture store refused deletion"); },
+        }));
+        try {
+          delete provider.apiKey;
+          saveConfigPreservingClaudeCode(config);
+          const account = reference.slice(reference.indexOf(":") + 1);
+          expect(() => keys.providerKeychainEntry(account).deletePassword()).toThrow("fixture store refused deletion");
+          if (!observedFirst) f.start();
+          const after = await f.inventory.collectLocalCredentials();
+          expect(after?.count).toBeGreaterThanOrEqual(1);
+        } finally { keys.setProviderKeychainEntryFactoryForTests(null); }
+      });
+    });
+  }
+}

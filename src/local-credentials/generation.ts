@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { getConfigDir } from "../config/paths";
 import { atomicWriteFileStreamed } from "../config/atomic-write";
 import { withCredentialPublicationFence, withCredentialPublicationFenceAsync } from "./publication-fence";
+import { configuredOsStoreAccounts } from "./references";
 import { readBoundedRegularFileSync } from "../lib/bounded-file-read";
 import { acquireCredentialObservationLease, credentialObservationLeaseAlive, sweepDeadCredentialObservationLeases } from "./observation-lease";
 
@@ -84,6 +85,11 @@ function save(home: string, state: CredentialGeneration): void {
 function advance(state: CredentialGeneration): void {
   if (state.sequence >= Number.MAX_SAFE_INTEGER) { state.epoch = randomUUID(); state.sequence = 0; }
   else state.sequence += 1;
+}
+/** Retain every OS-store account config.json references now; only a verified absence drops one. */
+function seedConfiguredAccounts(home: string, state: CredentialGeneration): void {
+  state.keyAccounts = [...new Set([...state.keyAccounts, ...configuredOsStoreAccounts(home)])];
+  if (state.keyAccounts.length > 8192) throw new Error("Too many private key accounts");
 }
 export function generationToken(state: CredentialGeneration): string {
   return `lc1:${state.epoch}:${state.sequence}`;
@@ -178,6 +184,7 @@ export function claimCredentialObservation(home: string, scan: (accounts: readon
     state.pending = [];
     state.epoch = randomUUID();
     state.sequence = 0;
+    seedConfiguredAccounts(home, state);
     const owner = randomUUID();
     const lease = acquireCredentialObservationLease(home, owner);
     sweepDeadCredentialObservationLeases(home, owner);
@@ -199,7 +206,10 @@ export function updateCredentialObservation(home: string, owner: string, scan: (
     advance(state);
     if (scan === null) state.coverage = null;
     else {
-      try { state.coverage.vector = scan(state.keyAccounts); }
+      try {
+        seedConfiguredAccounts(home, state);
+        state.coverage.vector = scan(state.keyAccounts);
+      }
       catch { state.coverage.vector = ""; }
     }
     save(home, state);

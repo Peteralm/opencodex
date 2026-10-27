@@ -98,7 +98,8 @@ export function providerKeychainEntry(account: string): ProviderKeychainEntry {
     setPassword: password => publishCredentialSync(() => entry.setPassword(password), {
       accounts: [account], absent: completed => completed ? [] : absent(),
     }),
-    deletePassword: () => publishCredentialSync(() => entry.deletePassword(), { absent }),
+    // Registered before the attempt, so a deletion that fails keeps the secret counted.
+    deletePassword: () => publishCredentialSync(() => entry.deletePassword(), { accounts: [account], absent }),
   };
 }
 
