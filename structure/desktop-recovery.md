@@ -20,8 +20,9 @@ The producer writes no discovery file. The consumer discovers the independently 
 process's actual IPv4 loopback listening sockets through the OS; files cannot nominate a port,
 exhaust the probe budget or hide a genuine listener. The listener accepts two fresh nonce
 challenges per connection, keeps the accepted socket
-open through inspection, bounds request/response size and connection time, and admits at most
-four simultaneous readers. It has no HTTP handler, credentials, mutations or idle polling timer.
+open through inspection, bounds request/response size, uses a three-second connection deadline,
+and admits at most four simultaneous readers. It has no HTTP handler, credentials, mutations or
+idle polling timer.
 
 ## Independent installation and process evidence
 

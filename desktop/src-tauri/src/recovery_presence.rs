@@ -15,7 +15,7 @@ use std::{
 };
 
 const DOMAIN: &str = "ocx-desktop-recovery-v1";
-const CONNECTION_BUDGET: Duration = Duration::from_secs(12);
+const CONNECTION_BUDGET: Duration = Duration::from_secs(3);
 const MAX_CONNECTIONS: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +228,45 @@ mod tests {
         drop(presence);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn idle_connections_release_every_slot_within_the_connection_budget() {
+        let presence = Presence::start(
+            "a".repeat(32),
+            Arc::new(|| Snapshot {
+                home: None,
+                wanted: true,
+            }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut idle: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|_| TcpStream::connect(presence.address).unwrap())
+            .collect();
+        for stream in &mut idle {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "idle connection exhausted the client budget"
+            );
+            stream.set_read_timeout(Some(remaining)).unwrap();
+            assert_eq!(stream.read(&mut [0_u8; 1]).unwrap(), 0);
+        }
+        assert!(Instant::now() < deadline);
+        // A fresh challenge is admitted after the entire idle cohort has expired.
+        let mut stream = TcpStream::connect(presence.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let nonce = "b".repeat(64);
+        stream
+            .write_all(format!("{DOMAIN} {nonce}\n").as_bytes())
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(&stream).read_line(&mut response).unwrap();
+        assert!(response.starts_with(&format!("{DOMAIN} {nonce} ")));
+        assert!(response.ends_with(" unknown -\n"));
     }
 
     #[test]

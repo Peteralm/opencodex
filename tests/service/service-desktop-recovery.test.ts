@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectDesktopRecovery, parseRecoveryAnswer, recoveryHomeIdentity,
@@ -254,14 +254,21 @@ console.log(JSON.stringify({ evidence, result }));`);
     finally { reader.releaseLock(); }
   };
   const stop = async () => { child?.kill(); await child?.exited; child = undefined; };
-  const probe = () => {
-    const result = Bun.spawnSync([cli], { env, stdout: "pipe", stderr: "pipe", timeout: 15_000 });
-    expect(result.exitCode).toBe(0);
-    return JSON.parse(result.stdout.toString().trim().split("\n").at(-1)!);
+  const probe = async () => {
+    const result = Bun.spawn([cli], { env, stdout: "pipe", stderr: "pipe", timeout: 15_000 });
+    const [stdout, exitCode] = await Promise.all([new Response(result.stdout).text(), result.exited]);
+    expect(exitCode).toBe(0);
+    return JSON.parse(stdout.trim().split("\n").at(-1)!);
   };
   try {
+    // Prove that this server observes a real foreign connection before using its absence.
+    const accepted = new Promise<Socket>(resolve => foreign.once("connection", resolve));
+    const control = connect({ host: "127.0.0.1", port: foreignPort });
+    (await accepted).destroy(); control.destroy();
+    expect(foreignSockets).toHaveLength(1);
+    foreignSockets.length = 0;
     await start(app);
-    expect(probe()).toEqual({ evidence: { kind: "recovering" }, result: { kind: "live", live: { fixture: true } } });
+    expect(await probe()).toEqual({ evidence: { kind: "recovering" }, result: { kind: "live", live: { fixture: true } } });
     // Files naming the real PID and a foreign silent endpoint cannot consume its proof budget,
     // including enough malformed records to have crowded out a legacy locator reader.
     for (let index = 0; index < 80; index++) {
@@ -269,36 +276,36 @@ console.log(JSON.stringify({ evidence, result }));`);
       writeFileSync(join(appConfig, `recovery-${child!.pid}-${instance}.json`), index < 40 ? "{" : JSON.stringify({ version: 1, pid: child!.pid, port: foreignPort, instance }));
     }
     writeFileSync(state, "other");
-    expect(probe()).toEqual({ evidence: { kind: "none" }, result: { kind: "cli" } });
+    expect(await probe()).toEqual({ evidence: { kind: "none" }, result: { kind: "cli" } });
     expect(foreignSockets).toHaveLength(0);
     writeFileSync(state, "recovering");
-    expect(probe().evidence).toEqual({ kind: "recovering" });
+    expect((await probe()).evidence).toEqual({ kind: "recovering" });
     writeFileSync(state, "stopped");
-    expect(probe().evidence).toEqual({ kind: "stopped" });
-    expect(probe().result.kind).toBe("failed");
+    expect((await probe()).evidence).toEqual({ kind: "stopped" });
+    expect((await probe()).result.kind).toBe("failed");
     writeFileSync(state, "unknown");
-    expect(probe().evidence).toEqual({ kind: "unknown" });
+    expect((await probe()).evidence).toEqual({ kind: "unknown" });
     writeFileSync(state, "recovering");
     const saved = join(root, "saved-native");
     copyFileSync(app, saved); unlinkSync(app);
-    expect(probe().evidence).toEqual({ kind: "unknown" });
+    expect((await probe()).evidence).toEqual({ kind: "unknown" });
     symlinkSync(saved, app);
-    expect(probe().evidence).toEqual({ kind: "unknown" });
+    expect((await probe()).evidence).toEqual({ kind: "unknown" });
     unlinkSync(app); mkdirSync(app);
-    expect(probe().evidence).toEqual({ kind: "unknown" });
+    expect((await probe()).evidence).toEqual({ kind: "unknown" });
     rmSync(app, { recursive: true });
     copyFileSync(saved, app); chmodSync(app, 0o700);
-    expect(probe().evidence).toEqual({ kind: "unknown" });
+    expect((await probe()).evidence).toEqual({ kind: "unknown" });
     await stop();
     unlinkSync(app);
-    expect(probe()).toEqual({ evidence: { kind: "none" }, result: { kind: "cli" } });
+    expect(await probe()).toEqual({ evidence: { kind: "none" }, result: { kind: "cli" } });
     copyFileSync(saved, app); chmodSync(app, 0o700);
     // Reuse the exact producer protocol from a different installation.
     // It is still no authority over this CLI merely because its basename matches Desktop.
     const outsider = join(root, "unrelated", "opencodex-desktop");
     mkdirSync(join(root, "unrelated")); copyFileSync(app, outsider); chmodSync(outsider, 0o700);
     writeFileSync(state, "recovering"); await start(outsider);
-    expect(probe()).toEqual({ evidence: { kind: "none" }, result: { kind: "cli" } });
+    expect(await probe()).toEqual({ evidence: { kind: "none" }, result: { kind: "cli" } });
   } finally {
     await stop(); foreignSockets.forEach(socket => socket.destroy());
     await new Promise<void>(resolve => foreign.close(() => resolve()));
