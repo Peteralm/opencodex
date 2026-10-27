@@ -11,6 +11,14 @@ describe("tool argument numeric preservation", () => {
     const raw = '{"label":7,"identifier":9007199254740993}';
     expect(coerceIntegerToolArguments(raw, schema)).toBe(raw);
   });
+  test("sees an unsafe value that a later duplicate key hides from JSON.parse", () => {
+    const raw = '{"count":1.0,"id":9007199254740993,"id":1}';
+    expect(coerceIntegerToolArguments(raw, schema)).toBe(raw);
+  });
+  test("ignores digits and escaped quotes inside strings", () => {
+    expect(coerceIntegerToolArguments('{"count":1.0,"note":"say \\"9007199254740993\\" 1e400"}', schema))
+      .toBe('{"count":1,"note":"say \\"9007199254740993\\" 1e400"}');
+  });
   test("still repairs safe values, including the safe integer boundary", () => {
     expect(coerceIntegerToolArguments('{"count":1.0,"label":7,"value":9007199254740991}', schema))
       .toBe('{"count":1,"label":"7","value":9007199254740991}');

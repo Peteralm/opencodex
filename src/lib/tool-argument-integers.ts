@@ -221,6 +221,34 @@ function coerceValue(
   return changed ? { value: next, changed } : { value, changed: false };
 }
 
+const JSON_NUMBER_TOKEN = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+
+/**
+ * True when a number token in valid JSON text would not survive `JSON.parse` and
+ * `JSON.stringify` exactly: an unsafe integer or a value that overflows to infinity.
+ * The raw text is scanned, so a value that a later duplicate key would hide is still seen.
+ */
+function hasUnsafeNumberToken(json: string): boolean {
+  let inString = false;
+  for (let index = 0; index < json.length; index += 1) {
+    const char = json[index];
+    if (inString) {
+      if (char === "\\") index += 1;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char !== "-" && (char < "0" || char > "9")) continue;
+    JSON_NUMBER_TOKEN.lastIndex = index;
+    const token = JSON_NUMBER_TOKEN.exec(json)?.[0];
+    if (!token) continue;
+    const value = Number(token);
+    if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) return true;
+    index += token.length - 1;
+  }
+  return false;
+}
+
 /**
  * Repair integral floats in a tool-call arguments STRING against the tool's declared
  * parameter schema.
@@ -240,14 +268,7 @@ export function coerceIntegerToolArguments(
   if (!/\d/.test(args)) return args;
   let parsed: unknown;
   try {
-    let unsafeNumber = false;
-    parsed = JSON.parse(args, (_key, value: unknown) => {
-      if (typeof value === "number" && (!Number.isFinite(value)
-        || (Number.isInteger(value) && !Number.isSafeInteger(value)))) unsafeNumber = true;
-      return value;
-    });
-    // Re-serializing even one repaired field also serializes every untouched sibling.
-    if (unsafeNumber) return args;
+    parsed = JSON.parse(args);
   } catch {
     // Malformed or still-streaming arguments are not this function's problem; the
     // existing paths already handle them.
@@ -256,5 +277,7 @@ export function coerceIntegerToolArguments(
   const root = parameters as SchemaNode;
   const result = coerceValue(parsed, root, root, 0, toolName);
   if (!result.changed) return args;
+  // Re-serializing even one repaired field also serializes every untouched sibling.
+  if (hasUnsafeNumberToken(args)) return args;
   return JSON.stringify(result.value);
 }
