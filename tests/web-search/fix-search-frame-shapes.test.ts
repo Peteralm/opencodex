@@ -47,6 +47,31 @@ describe("search SSE field shapes", () => {
     ]));
     expect(result).toEqual({ text: "First. Second.", sources: [] });
   });
+  test("matches an unindexed done event to the only indexed part", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "Hello" },
+      { type: "response.output_text.done", text: "Hello" },
+      { type: "response.completed" },
+    ]));
+    expect(result).toEqual({ text: "Hello", sources: [] });
+  });
+  test("assembles indexed parts in index order rather than arrival order", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "Second." },
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "First. " },
+      { type: "response.completed" },
+    ]));
+    expect(result).toEqual({ text: "First. Second.", sources: [] });
+  });
+  test("keeps valid completed parts that the indexed stream never sent", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "First. " },
+      { type: "response.completed", response: { output: [
+        null, { type: "message", content: [{ type: "output_text", text: "Second." }] },
+      ] } },
+    ]));
+    expect(result).toEqual({ text: "First. Second.", sources: [] });
+  });
   test("keeps the completed text when malformed entries leave no streamed text", async () => {
     const result = await parseSidecarSSE(response([{ type: "response.completed", response: { output: [
       { type: "message", content: "not-an-array" }, { type: "message", content: [{ type: "output_text", text: "kept" }] },

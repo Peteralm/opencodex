@@ -30,26 +30,63 @@ interface OutputItem {
   type?: string;
   content?: OutputTextBlock[];
 }
-/** Completed output text and citations; `incomplete` marks skipped malformed entries. */
-type CompletedOutput = WebSearchResult & { incomplete: boolean };
+/**
+ * Completed output text and citations. `parts` holds each output_text block's text keyed by
+ * `output_index:content_index`, and `incomplete` marks skipped malformed entries.
+ */
+type CompletedOutput = WebSearchResult & { incomplete: boolean; parts: Map<string, string> };
 /** Streamed text for one `output_text` content part. */
 interface StreamedPart {
   delta: string;
   done: string | null;
 }
 
-/** Key a streamed text event by its content part; events without valid indexes share one part. */
-function streamedPartKey(data: Record<string, unknown>): string {
+/** The streamed part for events that carry no valid `output_index`/`content_index`. */
+const UNINDEXED_PART = "unindexed";
+
+/**
+ * Key a streamed text event by its content part. An event without valid indexes joins the only
+ * indexed part when exactly one exists, and otherwise shares the separate unindexed part.
+ */
+function streamedPartKey(data: Record<string, unknown>, parts: Map<string, StreamedPart>): string {
   const output = data.output_index;
   const content = data.content_index;
-  return Number.isInteger(output) && Number.isInteger(content) ? `${output}:${content}` : "unindexed";
+  if (Number.isInteger(output) && Number.isInteger(content)) return `${output}:${content}`;
+  const indexed = [...parts.keys()].filter(key => key !== UNINDEXED_PART);
+  return indexed.length === 1 ? indexed[0]! : UNINDEXED_PART;
 }
 
-/** Join parts in arrival order, using each part's done text when present and its deltas otherwise. */
+/** Order `output_index:content_index` keys numerically. */
+function comparePartKeys(left: string, right: string): number {
+  const [leftOutput = 0, leftContent = 0] = left.split(":").map(Number);
+  const [rightOutput = 0, rightContent = 0] = right.split(":").map(Number);
+  return leftOutput - rightOutput || leftContent - rightContent;
+}
+
+/** One part's streamed text: its done text when present, otherwise its deltas. */
+function streamedPartText(part: StreamedPart): string {
+  return part.done?.trim() ? part.done : part.delta;
+}
+
+/** Join indexed parts in index order, followed by any unindexed text. */
 function assembleStreamedText(parts: Map<string, StreamedPart>): string {
-  let text = "";
-  for (const part of parts.values()) text += part.done?.trim() ? part.done : part.delta;
-  return text;
+  const keys = [...parts.keys()].filter(key => key !== UNINDEXED_PART).sort(comparePartKeys);
+  if (parts.has(UNINDEXED_PART)) keys.push(UNINDEXED_PART);
+  return keys.map(key => streamedPartText(parts.get(key)!)).join("");
+}
+
+/**
+ * Rebuild an incomplete completed output part by part: a part keeps its completed text when the
+ * completed output has it, and otherwise takes that part's streamed text.
+ */
+function mergeIncompleteOutput(completed: Map<string, string>, streamed: Map<string, StreamedPart>): string {
+  const keys = [...new Set([...completed.keys(), ...streamed.keys()])].sort(comparePartKeys);
+  return keys.map(key => {
+    const text = completed.get(key);
+    if (text?.trim()) return text;
+    const part = streamed.get(key);
+    return part ? streamedPartText(part) : text ?? "";
+  }).join("");
 }
 
 // Keep this compatibility export for non-Responses sidecar executors and bounded error bodies.
@@ -208,20 +245,22 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
 function fromOutputArray(output: OutputItem[], seen: Set<string>): CompletedOutput {
   let text = "";
   let incomplete = false;
+  const parts = new Map<string, string>();
   const sources: WebSearchSource[] = [];
-  for (const item of output) {
+  for (const [outputIndex, item] of output.entries()) {
     if (!item || typeof item !== "object") { incomplete = true; continue; }
     if (item.type !== "message") continue;
     if (!Array.isArray(item.content)) { incomplete = true; continue; }
-    for (const block of item.content) {
+    for (const [contentIndex, block] of item.content.entries()) {
       if (!block || typeof block !== "object") { incomplete = true; continue; }
       if (block.type === "output_text" && typeof block.text === "string") {
         text += block.text;
+        parts.set(`${outputIndex}:${contentIndex}`, block.text);
         for (const ann of Array.isArray(block.annotations) ? block.annotations : []) collectAnnotation(ann, sources, seen);
       }
     }
   }
-  return { text, sources, incomplete };
+  return { text, sources, incomplete, parts };
 }
 
 export function cancelReaderWithoutWaiting(
@@ -270,7 +309,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
 
   /** The accumulator for the content part that `data` belongs to. */
   const streamedPart = (data: Record<string, unknown>): StreamedPart => {
-    const key = streamedPartKey(data);
+    const key = streamedPartKey(data, acc.parts);
     let part = acc.parts.get(key);
     if (!part) { part = { delta: "", done: null }; acc.parts.set(key, part); }
     return part;
@@ -382,13 +421,16 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   }
 
   // Prefer the authoritative completed output[], then the done text, then accumulated deltas.
-  // A completed output with malformed entries may be partial, so streamed text wins when present.
-  // Each content part contributes its done text, or its deltas when the done event never arrived.
+  // Each streamed content part contributes its done text, or its deltas when the done event never
+  // arrived. A completed output that skipped malformed entries may be partial: indexed streams fill
+  // only the parts it lacks, while an unindexed stream replaces it as a whole.
   const streamedText = assembleStreamedText(acc.parts);
   const completedText = acc.final?.text.trim() ? acc.final.text : "";
-  const text = acc.final?.incomplete && streamedText.trim()
-    ? streamedText
-    : completedText || streamedText;
+  let text = completedText || streamedText;
+  if (acc.final?.incomplete) {
+    const repaired = acc.parts.has(UNINDEXED_PART) ? streamedText : mergeIncompleteOutput(acc.final.parts, acc.parts);
+    if (repaired.trim()) text = repaired;
+  }
   // Merge sources from the final output[] and the streaming annotation events.
   const sources = safeWebSearchSources(acc.final?.sources ?? []);
   for (const s of acc.streamSources) {
