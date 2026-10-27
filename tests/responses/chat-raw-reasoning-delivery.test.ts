@@ -10,6 +10,7 @@ import { responsesJsonToChatCompletion, responsesSseToChatCompletionsSse } from 
 import { foldChatCompletion } from "../../src/protocols/encoders/chat";
 import { handleChatCompletions } from "../../src/server/chat-completions";
 import { handleResponses } from "../../src/server/responses/core";
+import { handleClaudeMessages } from "../../src/server/claude-messages";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { protocolTraceForRequest } from "../../src/protocols/trace";
 import type { AdapterEvent, OcxConfig } from "../../src/types";
@@ -28,6 +29,7 @@ let codexHome: IsolatedCodexHome;
 let releaseSpend: () => void;
 let bodies: string[];
 let inlineTags: boolean;
+let sidecar: "web-search" | "video" | undefined;
 
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
@@ -37,6 +39,7 @@ beforeEach(() => {
   releaseSpend = acquireOwnedSpendHome();
   bodies = [];
   inlineTags = false;
+  sidecar = undefined;
   globalThis.fetch = (async (input, init) => {
     expect(String(input)).toBe("https://chat-reasoning.invalid/v1/chat/completions");
     bodies.push(String(init?.body));
@@ -74,6 +77,14 @@ function config(direct: boolean, hideRawReasoning = false): OcxConfig {
     } },
     protocols: { rollout: { directEncoders: direct } },
   };
+  if (sidecar === "web-search") value.webSearchSidecar = { backend: "exa", exaApiKey: "fixture-search-key" };
+  if (sidecar === "video") {
+    value.images = { videoBridgeEnabled: true };
+    value.providers.xai = {
+      adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", apiKey: "fixture-video-key",
+      models: ["grok-imagine-video"], liveModels: false,
+    };
+  }
   saveConfig(value);
   return value;
 }
@@ -96,7 +107,7 @@ async function dispatch(direct: boolean, stream: boolean, extra: Rec = {}, hideR
   expect(response.status).toBe(200);
   const text = await response.text();
   expect(protocolTraceForRequest(logCtx, logCtx.attempts)?.responsePath).toEqual(
-    direct ? ["chat", "ir", "chat"] : ["chat", "ir", "responses-internal", "chat"],
+    direct && !sidecar ? ["chat", "ir", "chat"] : ["chat", "ir", "responses-internal", "chat"],
   );
   expect(bodies).toHaveLength(1);
   const thought = stream
@@ -108,6 +119,64 @@ async function dispatch(direct: boolean, stream: boolean, extra: Rec = {}, hideR
   expect(answer).toBe(ANSWER);
   return thought;
 }
+
+function assertSidecarRequest(): void {
+  // Synthetic tool admission proves the sidecar executed even though the fixture never calls it.
+  const body = JSON.parse(bodies[0]!);
+  expect(body.tools.map((tool: Rec) => tool.function.name)).toEqual([sidecar === "web-search" ? "web_search" : "video_gen"]);
+  expect(body).not.toHaveProperty("chatRawReasoningVisible");
+  expect(body).not.toHaveProperty("reasoning");
+  expect(body).not.toHaveProperty("reasoning_effort");
+  expect(body).not.toHaveProperty("thinking");
+}
+
+describe("Chat raw reasoning through sidecar delivery (#7750)", () => {
+  for (const path of ["web-search", "video"] as const) for (const direct of [false, true]) for (const stream of [true, false]) {
+    const lane = `${path}, direct=${direct}, stream=${stream}`;
+    const tools = path === "web-search" ? { tools: [{ type: "web_search" }] } : {};
+    test(`${lane}: raw delivery preference leaves upstream bytes unchanged`, async () => {
+      sidecar = path;
+      await dispatch(direct, stream, tools);
+      const visibleBody = bodies[0];
+      assertSidecarRequest();
+      bodies = [];
+      expect(await dispatch(direct, stream, { ...tools, include_reasoning: false })).toBe("");
+      expect(bodies[0]).toBe(visibleBody);
+    });
+    for (const policy of ["default", "include false", "provider hide"] as const) {
+      test(`${lane}: ${policy}`, async () => {
+        sidecar = path;
+        const thought = await dispatch(direct, stream, { ...tools, ...(policy === "include false" ? { include_reasoning: false } : {}) }, policy === "provider hide");
+        assertSidecarRequest();
+        expect(thought).toBe(policy === "default" ? THOUGHT : "");
+      });
+    }
+    for (const ingress of ["responses", "messages"] as const) {
+      test(`${lane}: ${ingress} ingress keeps its omitted-reasoning default`, async () => {
+        sidecar = path;
+        const body = ingress === "responses"
+          ? { model: "fixture/gpt-4o", input: "fixture", stream, ...tools }
+          : { model: "fixture/gpt-4o", messages: [{ role: "user", content: "fixture" }], max_tokens: 64, stream,
+            ...(path === "web-search" ? { tools: [{ type: "web_search_20250305", name: "web_search" }] } : {}) };
+        const request = new Request(`http://localhost/v1/${ingress}`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+        });
+        const cfg = config(direct);
+        const response = ingress === "responses"
+          ? await handleResponses(request, cfg, { model: "", provider: "" })
+          : await handleClaudeMessages(request, cfg, { model: "", provider: "" });
+        expect(response.status).toBe(200);
+        const text = await response.text();
+        expect(text).not.toContain(THOUGHT);
+        expect(text).toContain(ANSWER);
+        expect(bodies).toHaveLength(1);
+        // Responses does not activate the video loop for buffered requests; Chat/Messages
+        // internally request SSE even when their caller asks for a buffered response.
+        if (path !== "video" || ingress !== "responses" || stream) assertSidecarRequest();
+      });
+    }
+  }
+});
 
 describe("Chat raw reasoning delivery without upstream opt-in (#7750)", () => {
   for (const direct of [false, true]) for (const stream of [true, false]) {
