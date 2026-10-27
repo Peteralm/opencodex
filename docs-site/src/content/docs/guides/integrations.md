@@ -927,6 +927,9 @@ sync`, `POST /api/sync`, and visibility, provider, or preset changes refresh an 
 block under the same safe owned-only rules as every other client, and a new Kilo session
 loads the updated file.
 
+When reading these candidate files, OpenCodex accepts a trailing comma after an array element or
+object property. Write an empty array or object as `[]` or `{}`; `[,]` and `{,}` are refused as malformed.
+
 ```bash
 ocx integration client enable --client kilo
 ocx export --client kilo --out ./kilo.jsonc
@@ -1059,5 +1062,3 @@ OpenCodex refuses those ambiguous settings. It also refuses an
 unsafe target or a row edited since apply. The integration is loopback only and
 never copies provider credentials. Factory documents the [BYOK schema](https://docs.factory.ai/model-independence/byok)
 and [personal settings path](https://docs.factory.ai/droid-cli/settings).
-
-In JSONC client settings, trailing commas are allowed after a value or property. Empty arrays and objects must be `[]` and `{}`, not `[,]` or `{,}`.

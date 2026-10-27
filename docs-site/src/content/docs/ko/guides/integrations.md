@@ -247,6 +247,8 @@ Kilo는 이 전역 파일을 모두 병합합니다. 다른 후보 파일에도 
 
 루프백에서는 `options.apiKey`로 `{env:OPENCODEX_KILO_API_KEY}`를 사용합니다. 루프백이 아닌 바인드에서는 인증을 `options.headers["x-opencodex-api-key"]`로 옮기며 실제 키를 저장하지 않습니다. 적용 시 전역 파일 전체를 보기 좋은 JSON으로 다시 쓰므로 다른 키의 주석과 후행 쉼표는 보존되지 않습니다. Kilo는 자동 카탈로그 갱신 대상입니다. `ocx sync`, `POST /api/sync`, 표시 여부·프로바이더·프리셋 변경은 다른 클라이언트와 같은 소유 블록만 갱신하는 안전한 규칙으로 소유한 Kilo 블록을 갱신하며, 새 Kilo 세션이 갱신된 파일을 읽습니다.
 
+후보 파일을 읽을 때 배열 요소나 객체 속성 뒤의 후행 쉼표는 허용합니다. 빈 배열과 객체는 `[]`, `{}`로 작성하세요. `[,]`, `{,}`는 잘못된 형식으로 거부합니다.
+
 ```bash
 ocx integration client enable --client kilo
 ocx export --client kilo --out ./kilo.jsonc
@@ -304,5 +306,3 @@ GitHub Copilot 데스크톱 앱에서 opencodex를 OpenAI 호환 모델 프로�
 행과 기본값이 함께 제거되며, 되돌리기는 저장된 행과 기본값을 함께 복원합니다.
 
 Factory Droid는 `~/.factory/settings.json`(Windows에서는 `%USERPROFILE%\.factory\settings.json`)을 사용합니다. `ocx integration client enable --client droid`로 명시적으로 활성화한 다음 `/model`에서 사용자 지정 모델을 선택하세요. 관리되는 항목에는 키가 없으며 루프백에서만 동작합니다. 비활성화하면 관리되는 항목이 제거되고, Undo는 저장된 원본 바이트를 복원합니다. 기존 `config.json`에 OpenCodex 항목이 있거나 `settings.local.json`이 `customModels`를 덮어쓰면 활성화 전에 충돌을 해결하세요. [Factory BYOK 문서](https://docs.factory.ai/model-independence/byok)를 참고하세요.
-
-JSONC 클라이언트 설정에서 값이나 속성 뒤의 후행 쉼표는 허용됩니다. 빈 배열과 객체는 `[,]`, `{,}`가 아닌 `[]`, `{}`로 작성해야 합니다.
