@@ -286,6 +286,6 @@ See the [Configuration reference](/reference/configuration/server/#sidecars) for
 
 Search responses with malformed optional fields retain valid answer text and citations. Invalid error-message values use a generic failure message.
 
-When a search answer ends with a Sources list, a list item without a URL stays in the answer instead of being removed as a citation. Text in inline code, such as `mode:fast`, is not mistaken for a link.
+When a search answer ends with a Sources list, an unmatched list item stays in the answer instead of being removed as a citation. A title followed by its URL is still consumed as one citation. Non-HTTP URI-like text inside inline code, such as `mode:fast`, stays in the answer; code-formatted HTTP(S) URLs are still citations.
 
 Long search queries and answers are shortened without splitting a UTF-16 surrogate pair, so a single character such as 😀 is never cut in half by the result limits. A sequence of several characters, such as emoji joined with a zero-width joiner, can still be cut between its parts.
