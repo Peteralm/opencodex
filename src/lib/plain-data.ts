@@ -50,6 +50,7 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
   return prototype === Object.prototype || prototype === null;
 }
 
+/** Copy one JSON-shaped value through property descriptors, or return `REFUSED` for anything else. */
 function copyValue(value: unknown, seen: Set<object>): unknown {
   if (value === null) return null;
   const type = typeof value;
@@ -69,7 +70,7 @@ function copyValue(value: unknown, seen: Set<object>): unknown {
       if (entry === undefined) continue;
       const item = copyValue(entry, seen);
       if (item === REFUSED) return REFUSED;
-      copied[key] = item;
+      Object.defineProperty(copied, key, { value: item, enumerable: true, writable: true, configurable: true });
     }
     return copied;
   } finally {
