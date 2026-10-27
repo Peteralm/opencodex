@@ -1,3 +1,4 @@
+import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../config/paths";
 import { recordCommittedDesktopGateway } from "../claude/desktop-gateway-state";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -242,7 +243,7 @@ async function applyConnectedDesktopProfile(
   deps: ApplyProfileDeps,
 ): Promise<{ ok: boolean; path: string; reason?: string; warning?: string }> {
   try {
-    const token = withClientLifecycleSync(() => withConfigMutationLockSync(() => {
+    const token = await settleConfigRoot(configRoot(), () => withClientLifecycleSync(() => withConfigMutationLockSync(() => {
       assertClientConnectionUnchanged(connection.value);
       if (connection.value.pendingOperation) throw new Error("client_rotation_pending");
       const current = readServiceApiTokenState();
@@ -254,7 +255,7 @@ async function applyConnectedDesktopProfile(
       const desired = setIntegrationEnabled("claude-desktop", true);
       if (!desired.ok) throw new Error("desktop_desired_state_write_failed");
       return current;
-    }), deps.lifecycleLockDeps);
+    }), deps.lifecycleLockDeps));
     const baseUrl = normalizeHubOrigin(connection.value.serverUrl);
     let snapshot: Awaited<ReturnType<typeof downloadDesktop3pModels>>;
     try {
@@ -262,7 +263,7 @@ async function applyConnectedDesktopProfile(
     } catch (error) {
       return { ok: false, path: "", reason: error instanceof HubClientError ? error.code : "desktop_download_failed" };
     }
-    const result: DesktopStoreResult = withClientLifecycleSync(held => withConfigMutationLockSync(() => {
+    const result: DesktopStoreResult = await settleConfigRoot(configRoot(), () => withClientLifecycleSync(held => withConfigMutationLockSync(() => {
       assertClientConnectionUnchanged(connection.value);
       const currentToken = readServiceApiTokenState();
       if (currentToken.kind !== "present" || currentToken.fingerprint !== connection.value.tokenFingerprint) {
@@ -275,7 +276,7 @@ async function applyConnectedDesktopProfile(
         expectedTokenFingerprint: currentToken.fingerprint,
         baseUrl, apiKey: currentToken.token, mode, models: snapshot.models,
       });
-    }), deps.lifecycleLockDeps);
+    }), deps.lifecycleLockDeps));
     if (!result.ok) return { ok: false, path: "", reason: `desktop_lifecycle_${result.reason}` };
     // Policy probes may spawn a process; perform them only after L/C have been released.
     const policyWarning = claudeDesktopPolicyWarning((deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)());
@@ -422,8 +423,8 @@ async function applyFirstPartyDesktop(
     }
   }
   const config = loadConfig();
-  const desired = setIntegrationEnabled("claude-desktop", true);
-  if (!desired.ok) return { ok: false, path: "", reason: desired.message };
+  const desired = await withFirstPartySecretsSettled(getConfigDir(), () => setIntegrationEnabled("claude-desktop", true));
+  if (!desired.ok) return "path" in desired ? desired : { ok: false, path: "", reason: desired.message };
   // Establish the replacement before deleting the working gateway. A refused
   // cleanup restores only our managed env keys, preserving unrelated settings.
   const rollback = captureDesktopFirstPartyRollback(config);
@@ -432,17 +433,17 @@ async function applyFirstPartyDesktop(
   const appliedFingerprint = config.claudeCode?.desktopProfile?.appliedFingerprint ?? null;
   const library = inspectDesktop3pConfigLibrary({ appliedFingerprint });
   if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
-    const removed = removeDesktop3pStandardPivot({ appliedFingerprint, replaceWhileEnabled: true });
+    const removed = await settleConfigRoot(configRoot(), () => removeDesktop3pStandardPivot({ appliedFingerprint, replaceWhileEnabled: true }));
     if (!removed.ok) {
       const restored = removed.changed || !applied.changed || await rollbackDesktopFirstPartySettled(getConfigDir(), rollback);
-      const modeSaved = !removed.changed || saveDesktopMode("first-party", deps);
+      const modeSaved = !removed.changed || await settleConfigRoot(configRoot(), () => saveDesktopMode("first-party", deps));
       const warning = [restored ? "" : "first-party settings rollback did not complete",
         modeSaved ? "" : "first-party is active but its mode marker was not saved"].filter(Boolean).join("; ");
       return { ok: false, path: library.selectedProfilePath ?? "", reason: removed.kind === "cleanup_incomplete" ? "gateway_cleanup_incomplete" : `gateway_profile_active:${removed.reason ?? removed.kind}`,
         ...(warning ? { warning } : {}) };
     }
   }
-  const saved = saveDesktopMode("first-party", deps);
+  const saved = await settleConfigRoot(configRoot(), () => saveDesktopMode("first-party", deps));
   return {
     ok: true,
     path: applied.path,
@@ -460,7 +461,7 @@ export async function applyDesktop(
   const result = await applyProfile(profile, target.mode, deps);
   if (!result.ok) return result;
   if (result.delegated) return result;
-  const modeSaved = saveDesktopMode("gateway", deps);
+  const modeSaved = await settleConfigRoot(configRoot(), () => saveDesktopMode("gateway", deps));
   const warning = [result.warning, modeSaved ? "" : "desktop mode marker was not saved"].filter(Boolean).join(" ");
   // The gateway mode is committed before retiring first-party settings.
   const removed = await removeDesktopFirstPartySettled(loadConfig);
@@ -484,11 +485,11 @@ export async function applyProfile(
   if (connection.kind !== "disconnected") return { ok: false, path: "", reason: "client_connection_invalid" };
   // Explicit apply is an enable action. Persist intent before any Desktop write
   // so a process crash cannot leave a gateway profile that startup immediately removes.
-  const desired = setIntegrationEnabled("claude-desktop", true);
+  const desired = await settleConfigRoot(configRoot(), () => setIntegrationEnabled("claude-desktop", true));
   if (!desired.ok) return { ok: false, path: "", reason: desired.message };
   const config = loadConfig();
   const state = await buildClaudeDesktopState(config, profile);
-  saveLocalDesktopProfile(state.profile, config.claudeCode?.desktopProfile, connection, deps);
+  await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(state.profile, config.claudeCode?.desktopProfile, connection, deps));
   const live = await (deps.findLiveProxyImpl ?? findLiveProxy)();
   assertNoClientDisconnectPending();
   if (readClientConnectionState().kind !== "disconnected") throw new Error("client_connection_changed");
@@ -535,7 +536,7 @@ export async function applyProfile(
     id: model.id,
     contextWindow: model.contextWindow,
   }));
-  const result = writeDesktop3pConfig(
+  const result = await settleConfigRoot(configRoot(), () => writeDesktop3pConfig(
     config.port ?? 10100,
     [...desktopVisibleNativeSlugs(config)],
     routed,
@@ -544,10 +545,10 @@ export async function applyProfile(
     state.profile,
     nativeContextLimits(config),
     deps.lifecycleLockDeps,
-  );
+  ));
   let stateWarning: string | undefined;
   if (result.written) {
-    try { saveLocalDesktopProfile(state.profile, state.profile, connection, deps, { fingerprint: result.fingerprint }); }
+    try { await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(state.profile, state.profile, connection, deps, { fingerprint: result.fingerprint })); }
     catch { stateWarning = "gateway applied but its committed mode/profile state was not saved"; }
   }
   const policyState = (deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)();
@@ -607,7 +608,7 @@ async function handleClaudeDesktopPickerCommand(
         return 1;
       }
     } else {
-      if (!persistPickerPreference(false)) {
+      if (!await settleConfigRoot(configRoot(), () => persistPickerPreference(false))) {
         console.error("Could not persist claudeCode.intercept.picker=false");
         return 1;
       }
@@ -836,7 +837,7 @@ export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProf
       if (!route || !isFamily(familyRaw) || flags.some(flag => flag !== "--default")) throw new CliUsageError("Usage: ocx claude desktop move <route> <family> [--default]");
       if (!state.models.some(model => model.route === route && model.available)) throw new Error(UNAVAILABLE_ROUTE);
       const profile = moveDesktopRoute(state.profile, route, familyRaw, flags.includes("--default"));
-      saveLocalDesktopProfile(profile, config.claudeCode?.desktopProfile, connection, deps);
+      await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(profile, config.claudeCode?.desktopProfile, connection, deps));
       console.log(`${route} 모델을 ${familyRaw} 그룹으로 옮겼습니다.`);
       return 0;
     }
@@ -846,7 +847,7 @@ export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProf
       const route = routeRaw === "none" ? null : routeRaw;
       if (route && !state.models.some(model => model.route === route && model.available)) throw new Error(UNAVAILABLE_ROUTE);
       const profile = setDesktopFamilyDefault(state.profile, familyRaw, route);
-      saveLocalDesktopProfile(profile, config.claudeCode?.desktopProfile, connection, deps);
+      await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(profile, config.claudeCode?.desktopProfile, connection, deps));
       console.log(`${familyRaw} 기본 모델을 ${route ?? "없음"}으로 지정했습니다.`);
       return 0;
     }
@@ -874,7 +875,7 @@ export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProf
       if (flags.includes("--apply") && readClientConnectionState().kind !== "disconnected") {
         throw new CliUsageError("Client connection changed; refusing import --apply. Connected Desktop apply uses the hub profile.");
       }
-      saveLocalDesktopProfile(reconciled, config.claudeCode?.desktopProfile, connection, deps);
+      await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(reconciled, config.claudeCode?.desktopProfile, connection, deps));
       if (flags.includes("--apply")) {
         // A routing profile is a gateway-mode artifact: importing with --apply installs it there.
         const result = await applyDesktop(reconciled, { kind: "gateway", mode: "static" }, deps);

@@ -1,3 +1,5 @@
+import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../../config/paths";
+import { WindowsSecretAclSettleTimeoutError } from "../../lib/windows-secret-acl";
 import { ensureManagementClaudeIntercept, interceptStartRefusal } from "./claude-intercept-routes";
 import { persistCommittedDesktopGateway } from "../../claude/desktop-gateway-state";
 import { commitClaudeCodeBlock } from "../../claude/claude-code-block";
@@ -676,11 +678,11 @@ function pickerCleanupNote(picker: DesktopPickerStatus): string {
 }
 
 /** Record which Desktop mode is applied; `false` when the config file could not be updated. */
-function persistDesktopModeMarker(config: ManagementContext["config"], desktopMode: ClaudeDesktopMode): boolean {
-  const outcome = mutatePersistedConfig(persisted => {
+async function persistDesktopModeMarker(config: ManagementContext["config"], desktopMode: ClaudeDesktopMode): Promise<boolean> {
+  const outcome = await settleConfigRoot(configRoot(), () => mutatePersistedConfig(persisted => {
     const result = recordClaudeDesktopMode(persisted, desktopMode);
     return { changed: result.changed, value: structuredClone(persisted.claudeCode) };
-  });
+  }));
   if (outcome.status === "unavailable") return false;
   adoptPersistedClaudeCode(config, outcome.value);
   // Pin the committed leaf: an unarmed baseline can otherwise retain a stale live mode.
@@ -706,7 +708,8 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
     if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
 
     const { setIntegrationEnabled } = await import("../../codex/desired-state");
-    const persisted = setIntegrationEnabled("claude-desktop", body.enabled);
+    const enabled = body.enabled;
+    const persisted = await settleConfigRoot(configRoot(), () => setIntegrationEnabled("claude-desktop", enabled));
     if (!persisted.ok) {
       return refusal(persisted.retryable ? 409 : 500, "claude-desktop", persisted.retryable ? "config_busy" : "write_failed", persisted.message);
     }
@@ -725,7 +728,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
           return postCommitRefusal(409, "claude-desktop", "write_failed",
             `Claude Code settings could not be read (${firstPartyRemoved.path}); the first-party proxy env was left in place.`, { desiredEnabled });
         }
-        const removed = (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint });
+        const removed = await settleConfigRoot(configRoot(), () => (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint }));
         if (removed.kind === "cleanup_incomplete") {
           return postCommitRefusal(500, "claude-desktop", "cleanup_incomplete",
             "Claude Desktop now points at standard mode, but credential cleanup is incomplete.",
@@ -767,12 +770,12 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
         const library = inspectDesktop3pConfigLibrary({ appliedFingerprint: fingerprint });
         let gatewayRemoved = false;
         if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
-          const removed = (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint, replaceWhileEnabled: true });
+          const removed = await settleConfigRoot(configRoot(), () => (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint, replaceWhileEnabled: true }));
           if (!removed.ok && !removed.changed && applied.changed && !await rollbackDesktopFirstPartySettled(getConfigDir(), rollback)) {
             return postCommitRefusal(500, "claude-desktop", "write_failed",
               "Gateway cleanup and first-party settings rollback did not complete.", { desiredEnabled });
           }
-          const partialModeWarning = !removed.ok && removed.changed && !persistDesktopModeMarker(ctx.config, "first-party")
+          const partialModeWarning = !removed.ok && removed.changed && !await persistDesktopModeMarker(ctx.config, "first-party")
             ? " First-party is active but its mode marker was not saved." : "";
           if (removed.kind === "cleanup_incomplete") {
             return postCommitRefusal(500, "claude-desktop", "cleanup_incomplete",
@@ -785,7 +788,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
           }
           gatewayRemoved = removed.changed;
         }
-        const modeSaved = persistDesktopModeMarker(ctx.config, "first-party");
+        const modeSaved = await persistDesktopModeMarker(ctx.config, "first-party");
         const changed = applied.changed || gatewayRemoved;
         // Picker mode is on by default in first-party; only a committed mode turns it on.
         const picker = modeSaved && pickerPreferenceOn(loadConfig())
@@ -821,7 +824,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
           provider: model.provider, id: model.id, contextWindow: model.contextWindow,
         }));
         const runtime = (ctx.deps.readRuntimePort ?? readRuntimePort)(process.pid);
-        const result = (ctx.deps.writeDesktop3pConfig ?? writeDesktop3pConfig)(
+        const result = await settleConfigRoot(configRoot(), () => (ctx.deps.writeDesktop3pConfig ?? writeDesktop3pConfig)(
           runtime?.port ?? latest.port,
           [...desktopVisibleNativeSlugs(latest)],
           routed,
@@ -829,9 +832,9 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
           "static",
           latest.claudeCode?.desktopProfile,
           nativeContextLimits(latest),
-        );
+        ));
         if (!result.written) return postCommitRefusal(500, "claude-desktop", "write_failed", "Claude Desktop apply failed.", { desiredEnabled: latestDesiredEnabled });
-        const committed = persistCommittedDesktopGateway(ctx.config, latest.claudeCode?.desktopProfile, result.fingerprint);
+        const committed = await settleConfigRoot(configRoot(), () => persistCommittedDesktopGateway(ctx.config, latest.claudeCode?.desktopProfile, result.fingerprint));
         const stateWarning = committed.ok ? "" : " The committed gateway mode/profile state was not saved.";
         const removed = await removeDesktopFirstPartySettled(loadConfig);
         if (!removed.ok) return postCommitRefusal(500, "claude-desktop", "write_failed", "Gateway applied, but first-party settings cleanup did not complete." + stateWarning, { desiredEnabled: latestDesiredEnabled });
@@ -851,6 +854,14 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
   })();
   try {
     return await claudeDesktopToggleFlight;
+  } catch (error) {
+    if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+    if (resolveClaudeDesktopApplyMode(ctx.config, observeClaudeDesktopMode(ctx.config)) === "first-party") {
+      return jsonResponse({ error: "native integration change failed", code: "native_integration_failed", clientId: "claude-desktop",
+        reason: "write_failed", message: "Config-directory ACL settlement timed out. Nothing was written.",
+        diagnostic: { stage: "ca", cause: "ETIMEDOUT" } }, 500);
+    }
+    return refusal(500, "claude-desktop", "write_failed", "Config-directory ACL settlement timed out. Nothing was written.");
   } finally {
     claudeDesktopToggleFlight = null;
   }

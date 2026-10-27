@@ -1,3 +1,4 @@
+import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../config/paths";
 /**
  * Align Grok and Claude Desktop files with the durable switches during `ocx ensure`.
  *
@@ -207,9 +208,9 @@ export async function ensureClaudeDesktopMatchesDesired(
     error(`⚠️  Claude Desktop first-party env cleanup failed: ${detail}.`);
   }
   try {
-    const removed = deps.removeDesktop3pStandardPivot({
+    const removed = await settleConfigRoot(configRoot(), () => deps.removeDesktop3pStandardPivot({
       appliedFingerprint: config.claudeCode?.desktopProfile?.appliedFingerprint ?? null,
-    });
+    }));
     if (removed.ok && removed.changed) {
       log("   ↩️  Claude Desktop integration residue removed.");
     } else if (!removed.ok) {

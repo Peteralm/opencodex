@@ -1,3 +1,4 @@
+import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../../config/paths";
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
 import { resolveMainAccountHardLockThresholds } from "../../codex/main-account-hard-lock";
 import { getMainAccountExternalUsageWarning } from "../../codex/main-account-external-usage";
@@ -274,7 +275,7 @@ export async function syncEnabledClientIntegrations(
       const models = await (deps.fetchAllModels ?? fetchAllModels)(config);
       // Serialized with Desktop mode transitions (picker lock): a first-party switch cannot interleave.
       const { runPickerTransition } = await import("./claude-desktop-picker-routes");
-      await runPickerTransition(config, async () => {
+      await runPickerTransition(config, () => settleConfigRoot(configRoot(), () => {
         // Discovery admits a concurrent OFF or settings edit. Re-read outside C:
         // the writer facade owns L and its final desired-state check under L→C.
         const latest = loadConfig();
@@ -314,7 +315,7 @@ export async function syncEnabledClientIntegrations(
               : { client: "claude-desktop", ok: true, changed: true });
           }
         }
-      });
+      }));
     } catch (error) {
       out.push({ client: "claude-desktop", ok: false, reason: error instanceof Error ? error.message : String(error) });
     }
@@ -766,7 +767,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         else deleteConfigTopLevelKey(config, "codexQuotaAutoRefresh");
       }
       pickerIsEnabled = codexAccountPickerEnabled(config);
-      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      await settleConfigRoot(configRoot(), () => (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config));
     } catch (error) {
       if (previousSettings.hasCodexAutoStart) config.codexAutoStart = previousSettings.codexAutoStart;
       else deleteConfigTopLevelKey(config, "codexAutoStart");
@@ -1224,7 +1225,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         else config.visionSidecar.reasoning = normalizedVisionReasoning;
       }
     }
-    saveConfigPreservingClaudeCode(config);
+    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
     // Publish the changed attachment affordance to both the managed catalog and Codex cache.
     // Use the existing bounded catalog-only path after persistence, outside the config lock.
     const catalogRefresh = visionEnabledBefore !== (config.visionSidecar?.enabled !== false)
@@ -1298,7 +1299,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (body.model === "") delete config.shadowCallIntercept.model;
       else config.shadowCallIntercept.model = body.model;
     }
-    saveConfigPreservingClaudeCode(config);
+    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
     const sci = config.shadowCallIntercept;
     return jsonResponse({
       ok: true,
@@ -1329,7 +1330,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         if (trimmed === "") delete config.autoReviewOverride.model;
         else config.autoReviewOverride.model = trimmed;
       }
-      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      await settleConfigRoot(configRoot(), () => (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config));
     } catch (error) {
       if (!(error instanceof ConfigWritePublishedError)) rollback();
       throw error;
