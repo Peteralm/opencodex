@@ -62,7 +62,8 @@ const URL_RE = /https?:\/\/[^\s<>()\[\]]+/i;
 // Recognize URI-like candidates separately from the HTTP(S)-only acceptance boundary. A rejected
 // citation (for example `javascript:`) still belongs to the trailing Sources block and must not be
 // left behind as ordinary assistant text.
-const URI_LIKE_RE = /[a-z][a-z0-9+.-]*:[^\s<>()\[\]]+/i;
+// The scheme length is bounded so a long word without a colon is scanned in linear time.
+const URI_LIKE_RE = /[a-z][a-z0-9+.-]{0,31}:[^\s<>()\[\]]+/i;
 // A "Sources:" / "Source:" header, allowing markdown prefixes (#, *, -, >) and bold/italic wrappers.
 const SOURCES_WORD_RE = /^sources?/i;
 
@@ -111,17 +112,58 @@ function isSourcesHeader(line: string): boolean {
   return cursor === line.length;
 }
 
-/** Trim wrapping/trailing noise from a captured URL: angle brackets, then trailing punctuation. */
+/** Trim wrapping/trailing noise from a captured URL: angle brackets, then trailing punctuation and code backticks. */
 function cleanUrl(url: string): string {
-  return url.replace(/^<+/, "").replace(/[)>\].,;:]+$/, "");
+  return url.replace(/^<+/, "").replace(/[)>\].,;:`]+$/, "");
 }
 
 /** Derive a human title from the list-item text preceding the URL (strip markers, md link, seps). */
 function cleanTitle(prefix: string): string {
-  let title = prefix.replace(/^[-*>\d.)\s]+/, "").trim();
+  let title = prefix.replace(/^[-*+>\d.)\s]+/, "").trim();
   // `[title](` from a markdown link, or a leading `[`.
-  title = title.replace(/^\[/, "").replace(/\]\(?$/, "").replace(/[:\-—(<]\s*$/, "").trim();
-  return title;
+  title = title.replace(/^\[/, "").replace(/\]\(?$/, "");
+  // Trailing separators and an opening code backtick, trimmed by a linear scan.
+  let end = title.length;
+  while (end > 0 && TITLE_TRAILING_SEPARATORS.has(title[end - 1]!)) end -= 1;
+  return title.slice(0, end).trim();
+}
+
+const TITLE_TRAILING_SEPARATORS = new Set([":", "-", "—", "(", "<", "`", " ", "\t"]);
+
+/** A line that looks like a list item (bullet, quote or ordinal marker). */
+const LIST_ITEM_RE = /^[-*+>\d.)]/;
+
+/**
+ * Replace inline code spans with spaces of equal length. A span opens and closes with backtick runs
+ * of equal length; runs are paired in one pass, so an unmatched run cannot cause backtracking.
+ */
+function maskInlineCode(line: string): string {
+  const runs: Array<{ start: number; end: number }> = [];
+  for (let index = 0; index < line.length;) {
+    if (line[index] !== "`") { index += 1; continue; }
+    const start = index;
+    while (line[index] === "`") index += 1;
+    runs.push({ start, end: index });
+  }
+  if (runs.length < 2) return line;
+  // For each run, the index of the next run with the same length, or -1.
+  const next = new Array<number>(runs.length).fill(-1);
+  const lastByLength = new Map<number, number>();
+  for (let run = runs.length - 1; run >= 0; run -= 1) {
+    const length = runs[run]!.end - runs[run]!.start;
+    next[run] = lastByLength.get(length) ?? -1;
+    lastByLength.set(length, run);
+  }
+  let masked = "";
+  let cursor = 0;
+  for (let run = 0; run < runs.length;) {
+    const close = next[run]!;
+    if (close === -1) { run += 1; continue; }
+    masked += line.slice(cursor, runs[run]!.start) + " ".repeat(runs[close]!.end - runs[run]!.start);
+    cursor = runs[close]!.end;
+    run = close + 1;
+  }
+  return masked + line.slice(cursor);
 }
 
 /**
@@ -158,12 +200,12 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     const httpMatch = raw.match(URL_RE);
     // URI-like text inside an inline code span of any backtick run, such as `mode:fast`, is prose
     // rather than a citation. HTTP(S) URLs keep their citation meaning even when code-formatted.
-    const m = httpMatch ?? raw.replace(/(`+)(.+?)\1/g, span => " ".repeat(span.length)).match(URI_LIKE_RE);
+    const m = httpMatch ?? maskInlineCode(raw).match(URI_LIKE_RE);
     if (!m) {
       // A list-ish line with no URL may be a title whose URL is on the next line. Only treat it as a
       // pending title when it looks like a list item; otherwise it's prose → stop. A second list item
       // means the previous one was a note, so it is kept instead of discarded.
-      if (!/^[-*>\d.)]/.test(raw)) break;
+      if (!LIST_ITEM_RE.test(raw)) break;
       if (pendingTitle !== null) keptNotes.push(pendingIndex);
       pendingTitle = raw;
       pendingIndex = i;
@@ -172,7 +214,7 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     // A non-HTTP URI embedded in prose is not sufficient to classify the line as a citation.
     // Accept it as a consumed source line only when it is a list item or the whole line starts with
     // the URI candidate, matching the existing bare-URL grammar.
-    if (!httpMatch && !/^[-*>\d.)]/.test(raw) && m.index !== 0) break;
+    if (!httpMatch && !LIST_ITEM_RE.test(raw) && m.index !== 0) break;
     const url = cleanUrl(m[0]);
     if (!url) { break; }
     const inlinePrefix = raw.slice(0, m.index);

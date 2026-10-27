@@ -50,6 +50,27 @@ describe("search source-list text ownership", () => {
     expect(result.text).toBe("Answer\n\n- Keep this note");
     expect(result.sources).toEqual([{ url: "https://example.com" }, { url: "https://example.org" }]);
   });
+  test("keeps a plus-bullet note before a marked URL item", async () => {
+    const result = await parse("Answer\nSources:\n+ Keep this note\n- https://example.com");
+    expect(result.text).toBe("Answer\n\n+ Keep this note");
+    expect(result.sources).toEqual([{ url: "https://example.com" }]);
+  });
+  test("strips the closing backtick from a code-formatted citation URL", async () => {
+    const result = await parse("Answer\nSources:\n- `https://example.com/page`");
+    expect(result.text).toBe("Answer");
+    expect(result.sources).toEqual([{ url: "https://example.com/page" }]);
+  });
+  test("masks inline code in linear time on long unmatched backtick runs", async () => {
+    // The previous backreference regex took about 3 s on this 16 KiB line, and the unbounded
+    // URI scheme pattern grew quadratically on a long word without a colon.
+    const unmatched = "`".repeat(8_000) + "x".repeat(8_000);
+    const longWord = "x".repeat(32_000);
+    const started = performance.now();
+    const result = await parse(`Answer\nSources:\n- https://example.com\n- ${unmatched} mode:fast\n- ${longWord} mode:fast`);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(result.text).toBe("Answer");
+    expect(result.sources).toEqual([{ url: "https://example.com" }]);
+  });
   test("still consumes a title followed immediately by its URL", async () => {
     const result = await parse("Answer\nSources:\n- A title\nhttps://example.com\n\nConclusion");
     expect(result.text).toBe("Answer\n\nConclusion");
