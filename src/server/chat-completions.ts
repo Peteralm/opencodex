@@ -8,6 +8,7 @@
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import {
   assertChatCompletionsRoutingBody,
+  chatRawReasoningVisible,
   ChatCompletionsRequestError,
 } from "../chat/inbound";
 import { chatSettingsBody, chatToResponsesBody } from "../protocols/codecs/chat";
@@ -518,6 +519,7 @@ async function handleChatCompletionsWithBudget(
     abortSignal: req.signal,
     // Body is Responses-shaped by now, but the client spoke Chat Completions.
     inboundWire: "chat",
+    chatRawReasoningVisible: chatRawReasoningVisible(chatBody),
     // A Chat caller may send an explicit empty `tools` array — a deny-all declaration the
     // translation drops along with the whole catalog. Carried separately so the
     // undeclared-tool guard can still enforce it; absent/partial catalogs stay deferred.
