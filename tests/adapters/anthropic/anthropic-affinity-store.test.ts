@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, spyOn } from "bun:test";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
@@ -124,14 +124,15 @@ test("2000 bindings use one auth snapshot per hydration, touch and invalidation"
   const accounts = getAccountSet("anthropic");
   const reads = spyOn(authStore, "getAccountSet").mockImplementation(() => accounts);
   try {
-    expect(store.size).toBe(2000); expect(reads).toHaveBeenCalledTimes(1);
+    expect(store.size).toBe(2000); const hydrationReads = reads.mock.calls.length;
     reads.mockClear();
     const touched = "0".repeat(64);
     store.set(touched, { accountId: id, lastUsedAt: Date.now() });
-    expect(reads).toHaveBeenCalledTimes(1);
+    const setReads = reads.mock.calls.length;
     reads.mockClear(); expect(store.get(touched)?.accountId).toBe(id);
-    expect(reads).toHaveBeenCalledTimes(1);
-    reads.mockClear(); await store.flush(); expect(reads).not.toHaveBeenCalled();
+    const getReads = reads.mock.calls.length;
+    reads.mockClear(); await store.flush();
+    expect([hydrationReads, setReads, getReads, reads.mock.calls.length]).toEqual([1, 1, 1, 0]);
     accounts!.accounts[0]!.paused = true;
     reads.mockClear(); store.invalidate(accounts);
     expect(reads).not.toHaveBeenCalled(); expect(store.size).toBe(0);
@@ -154,7 +155,7 @@ for (const dangling of [false, true]) test.skipIf(linkUnavailable)(`final ${dang
   const warning = spyOn(console, "warn").mockImplementation(() => {});
   try {
     // Replace the fixture's own snapshot with a link to a target outside the config home.
-    const { unlinkSync } = await import("node:fs"); unlinkSync(path());
+    unlinkSync(path());
     if (!dangling) writeFileSync(target, JSON.stringify(data));
     symlinkSync(target, path(), "file");
     expect(store.size).toBe(0); expect(warning).toHaveBeenCalled();
@@ -179,5 +180,21 @@ test("pending writes and shutdown cannot publish a previous home's rows", async 
     expect(existsSync(anthropicAffinityPath(other, "anthropic"))).toBe(false);
     process.env.OPENCODEX_HOME = home;
     expect(store.get(key)).toBeUndefined();
+  } finally { store.resetMemory(); process.env.OPENCODEX_HOME = home; removeTreeWithRetry(other); }
+});
+
+test("a config-home directory alias preserves hydration and no-follow publication", async () => {
+  const { store } = await snapshot(); store.resetMemory();
+  const other = mkdtempSync(join(tmpdir(), "ocx-affinity-alias-"));
+  const alias = join(other, "home");
+  try {
+    symlinkSync(home, alias, process.platform === "win32" ? "junction" : "dir");
+    process.env.OPENCODEX_HOME = alias;
+    expect(store.get(key)?.accountId).toBe(id);
+    const otherKey = anthropicAffinityDigest("anthropic", "aliased-session");
+    store.set(otherKey, { accountId: id, lastUsedAt: Date.now() }); await store.flush();
+    expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+    process.env.OPENCODEX_HOME = home;
+    expect(store.get(otherKey)?.accountId).toBe(id);
   } finally { store.resetMemory(); process.env.OPENCODEX_HOME = home; removeTreeWithRetry(other); }
 });
