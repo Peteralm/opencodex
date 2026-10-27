@@ -1,4 +1,5 @@
 import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../../config/paths";
+import { WindowsSecretAclSettleTimeoutError } from "../../lib/windows-secret-acl";
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
 import { resolveMainAccountHardLockThresholds } from "../../codex/main-account-hard-lock";
 import { getMainAccountExternalUsageWarning } from "../../codex/main-account-external-usage";
@@ -358,6 +359,14 @@ function publicVisionSidecarSettings(
 
 /** Serve validated settings and publish catalog-affecting changes after persistence. */
 export async function handleConfigRoutes(ctx: ManagementContext): Promise<Response | null> {
+  try { return await handleConfigRoutesImpl(ctx); }
+  catch (error) {
+    if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+    return jsonResponse({ error: "Could not save settings", code: "write_failed", diagnostic: { stage: "ca", cause: "ETIMEDOUT" } }, 500);
+  }
+}
+
+async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
   const readStartupHealth = deps.getCachedStartupHealth ?? getCachedStartupHealth;
   // Settings only seed the dashboard chip; /api/startup-health owns the bounded fresh read.
@@ -667,153 +676,155 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     )) {
       return jsonResponse({ error: `appOwnedMemoryBudgetMb must be an integer from ${MIN_APP_OWNED_MEMORY_BUDGET_MB} to ${MAX_APP_OWNED_MEMORY_BUDGET_MB}` }, 400);
     }
-    const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention"]);
-    const previousSettings = {
-      codexAutoStart: config.codexAutoStart,
-      hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
-      streamMode: config.streamMode,
-      hasStreamMode: Object.hasOwn(config, "streamMode"),
-      appOwnedMemoryBudgetMb: config.appOwnedMemoryBudgetMb,
-      hasAppOwnedMemoryBudgetMb: Object.hasOwn(config, "appOwnedMemoryBudgetMb"),
-      codexAccountNamespaces: config.codexAccountNamespaces,
-      hasCodexAccountNamespaces: Object.hasOwn(config, "codexAccountNamespaces"),
-      codexAccountPickerEnabled: config.codexAccountPickerEnabled,
-      hasCodexAccountPickerEnabled: Object.hasOwn(config, "codexAccountPickerEnabled"),
-      codexQuotaAutoRefresh: config.codexQuotaAutoRefresh,
-      hasCodexQuotaAutoRefresh: Object.hasOwn(config, "codexQuotaAutoRefresh"),
-      oauthOpenBrowser: config.oauthOpenBrowser,
-      hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
-      showCodexCredits: config.showCodexCredits,
-      hasShowCodexCredits: Object.hasOwn(config, "showCodexCredits"),
-      ultraFastTier: config.ultraFastTier,
-      hasUltraFastTier: Object.hasOwn(config, "ultraFastTier"),
-      fastRows: config.fastRows,
-      hasFastRows: Object.hasOwn(config, "fastRows"),
-      codexMainAccountHardLockThresholds: config.codexMainAccountHardLockThresholds,
-      hasCodexMainAccountHardLockThresholds: Object.hasOwn(config, "codexMainAccountHardLockThresholds"),
-      codexMainAccountHardLock: config.codexMainAccountHardLock,
-      hasCodexMainAccountHardLock: Object.hasOwn(config, "codexMainAccountHardLock"),
-      codexMainAccountHardLockFallback: config.codexMainAccountHardLockFallback,
-      hasCodexMainAccountHardLockFallback: Object.hasOwn(config, "codexMainAccountHardLockFallback"),
-      codexDesktopAuthless: config.codexDesktopAuthless,
-      hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
-      codexClientCompaction: config.codexClientCompaction,
-      hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
-    };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
     let pickerIsEnabled = pickerWasEnabled;
     const authlessWasEnabled = config.codexDesktopAuthless === true;
     const clientCompactionWasEnabled = config.codexClientCompaction === true;
     const fastRowsWasEnabled = config.fastRows !== false;
-    try {
-      if (typeof body.codexAutoStart === "boolean") {
-        config.codexAutoStart = body.codexAutoStart;
-      }
-      if (body.streamMode !== undefined) {
-        if (body.streamMode === "auto") {
-          deleteConfigTopLevelKey(config, "streamMode");
-        } else {
-          config.streamMode = body.streamMode as "legacy-tee" | "eager-relay";
+    await settleConfigRoot(configRoot(), () => {
+      const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention"]);
+      const previousSettings = {
+        codexAutoStart: config.codexAutoStart,
+        hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
+        streamMode: config.streamMode,
+        hasStreamMode: Object.hasOwn(config, "streamMode"),
+        appOwnedMemoryBudgetMb: config.appOwnedMemoryBudgetMb,
+        hasAppOwnedMemoryBudgetMb: Object.hasOwn(config, "appOwnedMemoryBudgetMb"),
+        codexAccountNamespaces: config.codexAccountNamespaces,
+        hasCodexAccountNamespaces: Object.hasOwn(config, "codexAccountNamespaces"),
+        codexAccountPickerEnabled: config.codexAccountPickerEnabled,
+        hasCodexAccountPickerEnabled: Object.hasOwn(config, "codexAccountPickerEnabled"),
+        codexQuotaAutoRefresh: config.codexQuotaAutoRefresh,
+        hasCodexQuotaAutoRefresh: Object.hasOwn(config, "codexQuotaAutoRefresh"),
+        oauthOpenBrowser: config.oauthOpenBrowser,
+        hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
+        showCodexCredits: config.showCodexCredits,
+        hasShowCodexCredits: Object.hasOwn(config, "showCodexCredits"),
+        ultraFastTier: config.ultraFastTier,
+        hasUltraFastTier: Object.hasOwn(config, "ultraFastTier"),
+        fastRows: config.fastRows,
+        hasFastRows: Object.hasOwn(config, "fastRows"),
+        codexMainAccountHardLockThresholds: config.codexMainAccountHardLockThresholds,
+        hasCodexMainAccountHardLockThresholds: Object.hasOwn(config, "codexMainAccountHardLockThresholds"),
+        codexMainAccountHardLock: config.codexMainAccountHardLock,
+        hasCodexMainAccountHardLock: Object.hasOwn(config, "codexMainAccountHardLock"),
+        codexMainAccountHardLockFallback: config.codexMainAccountHardLockFallback,
+        hasCodexMainAccountHardLockFallback: Object.hasOwn(config, "codexMainAccountHardLockFallback"),
+        codexDesktopAuthless: config.codexDesktopAuthless,
+        hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
+        codexClientCompaction: config.codexClientCompaction,
+        hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
+      };
+      try {
+        if (typeof body.codexAutoStart === "boolean") {
+          config.codexAutoStart = body.codexAutoStart;
         }
+        if (body.streamMode !== undefined) {
+          if (body.streamMode === "auto") {
+            deleteConfigTopLevelKey(config, "streamMode");
+          } else {
+            config.streamMode = body.streamMode as "legacy-tee" | "eager-relay";
+          }
+        }
+        if (typeof body.appOwnedMemoryBudgetMb === "number") {
+          config.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
+        }
+        if (body.codexAccountPickerEnabled === true) {
+          config.codexAccountPickerEnabled = true;
+          initializeDefaultCodexAccountNamespaces(config);
+        } else if (body.codexAccountPickerEnabled === false) {
+          config.codexAccountPickerEnabled = false;
+        }
+        if (typeof body.showCodexCredits === "boolean") config.showCodexCredits = body.showCodexCredits;
+        if (typeof body.oauthOpenBrowser === "boolean") {
+          config.oauthOpenBrowser = body.oauthOpenBrowser;
+        }
+        // Off deletes the key rather than persisting `false`: absent is the documented
+        // default, and a written `false` would survive as a decision nobody made.
+        if (body.ultraFastTier === true) config.ultraFastTier = true;
+        else if (body.ultraFastTier === false) deleteConfigTopLevelKey(config, "ultraFastTier");
+        if (body.fastRows === false) config.fastRows = false;
+        else if (body.fastRows === true) deleteConfigTopLevelKey(config, "fastRows");
+        // Inverted from the pair above because the default is on (#5694): off is the persisted
+        // decision, so it writes `false`, while on deletes the key and returns to the default.
+        if (hardLockThresholds !== undefined) config.codexMainAccountHardLockThresholds = { ...hardLockThresholds };
+        if (body.codexMainAccountHardLock === false) config.codexMainAccountHardLock = false;
+        else if (body.codexMainAccountHardLock === true) deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
+        if (hardLockFallback === null) deleteConfigTopLevelKey(config, "codexMainAccountHardLockFallback");
+        else if (hardLockFallback?.success) config.codexMainAccountHardLockFallback = hardLockFallback.data;
+        if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
+        else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
+        if (body.codexClientCompaction === true) config.codexClientCompaction = true;
+        else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(config, "codexClientCompaction");
+        if (compactionRouting === null) deleteConfigTopLevelKey(config, "compactionRouting");
+        else if (compactionRouting?.success) config.compactionRouting = compactionRouting.data;
+        if (compactionRecovery === null) deleteConfigTopLevelKey(config, "compactionRecovery");
+        else if (compactionRecovery?.success) config.compactionRecovery = compactionRecovery.data;
+        if (reasoningRetention === null) deleteConfigTopLevelKey(config, "reasoningRetention");
+        else if (reasoningRetention?.success) config.reasoningRetention = reasoningRetention.data;
+        // Null clears both phases; the GUI sends that when neither row names a model.
+        if (memoryModels === null) deleteConfigTopLevelKey(config, "memoryModels");
+        else if (memoryModels?.success) config.memoryModels = memoryModels.data;
+        if (quotaAutoRefreshChange) {
+          const { id, window, enabled } = quotaAutoRefreshChange;
+          const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
+          if (enabled) setting[window] = true;
+          else delete setting[window];
+          const all = { ...(config.codexQuotaAutoRefresh ?? {}) };
+          if (Object.keys(setting).length > 0) all[id] = setting;
+          else delete all[id];
+          if (Object.keys(all).length > 0) config.codexQuotaAutoRefresh = all;
+          else deleteConfigTopLevelKey(config, "codexQuotaAutoRefresh");
+        }
+        pickerIsEnabled = codexAccountPickerEnabled(config);
+        (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      } catch (error) {
+        if (previousSettings.hasCodexAutoStart) config.codexAutoStart = previousSettings.codexAutoStart;
+        else deleteConfigTopLevelKey(config, "codexAutoStart");
+        if (previousSettings.hasStreamMode) config.streamMode = previousSettings.streamMode;
+        else deleteConfigTopLevelKey(config, "streamMode");
+        if (previousSettings.hasAppOwnedMemoryBudgetMb) {
+          config.appOwnedMemoryBudgetMb = previousSettings.appOwnedMemoryBudgetMb;
+        } else deleteConfigTopLevelKey(config, "appOwnedMemoryBudgetMb");
+        if (previousSettings.hasCodexAccountNamespaces) {
+          config.codexAccountNamespaces = previousSettings.codexAccountNamespaces;
+        } else deleteConfigTopLevelKey(config, "codexAccountNamespaces");
+        if (previousSettings.hasCodexAccountPickerEnabled) {
+          config.codexAccountPickerEnabled = previousSettings.codexAccountPickerEnabled;
+        } else deleteConfigTopLevelKey(config, "codexAccountPickerEnabled");
+        if (previousSettings.hasCodexQuotaAutoRefresh) {
+          config.codexQuotaAutoRefresh = previousSettings.codexQuotaAutoRefresh;
+        } else deleteConfigTopLevelKey(config, "codexQuotaAutoRefresh");
+        if (previousSettings.hasShowCodexCredits) config.showCodexCredits = previousSettings.showCodexCredits;
+        else deleteConfigTopLevelKey(config, "showCodexCredits");
+        if (previousSettings.hasOauthOpenBrowser) {
+          config.oauthOpenBrowser = previousSettings.oauthOpenBrowser;
+        } else deleteConfigTopLevelKey(config, "oauthOpenBrowser");
+        if (previousSettings.hasUltraFastTier) {
+          config.ultraFastTier = previousSettings.ultraFastTier;
+        } else deleteConfigTopLevelKey(config, "ultraFastTier");
+        if (previousSettings.hasFastRows) {
+          config.fastRows = previousSettings.fastRows;
+        } else deleteConfigTopLevelKey(config, "fastRows");
+        if (previousSettings.hasCodexMainAccountHardLockThresholds) {
+          config.codexMainAccountHardLockThresholds = previousSettings.codexMainAccountHardLockThresholds;
+        } else deleteConfigTopLevelKey(config, "codexMainAccountHardLockThresholds");
+        if (previousSettings.hasCodexMainAccountHardLock) {
+          config.codexMainAccountHardLock = previousSettings.codexMainAccountHardLock;
+        } else deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
+        if (previousSettings.hasCodexMainAccountHardLockFallback) {
+          config.codexMainAccountHardLockFallback = previousSettings.codexMainAccountHardLockFallback;
+        } else deleteConfigTopLevelKey(config, "codexMainAccountHardLockFallback");
+        if (previousSettings.hasCodexDesktopAuthless) {
+          config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
+        } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
+        if (previousSettings.hasCodexClientCompaction) {
+          config.codexClientCompaction = previousSettings.codexClientCompaction;
+        } else deleteConfigTopLevelKey(config, "codexClientCompaction");
+        restoreCompactionRouting();
+        throw error;
       }
-      if (typeof body.appOwnedMemoryBudgetMb === "number") {
-        config.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
-      }
-      if (body.codexAccountPickerEnabled === true) {
-        config.codexAccountPickerEnabled = true;
-        initializeDefaultCodexAccountNamespaces(config);
-      } else if (body.codexAccountPickerEnabled === false) {
-        config.codexAccountPickerEnabled = false;
-      }
-      if (typeof body.showCodexCredits === "boolean") config.showCodexCredits = body.showCodexCredits;
-      if (typeof body.oauthOpenBrowser === "boolean") {
-        config.oauthOpenBrowser = body.oauthOpenBrowser;
-      }
-      // Off deletes the key rather than persisting `false`: absent is the documented
-      // default, and a written `false` would survive as a decision nobody made.
-      if (body.ultraFastTier === true) config.ultraFastTier = true;
-      else if (body.ultraFastTier === false) deleteConfigTopLevelKey(config, "ultraFastTier");
-      if (body.fastRows === false) config.fastRows = false;
-      else if (body.fastRows === true) deleteConfigTopLevelKey(config, "fastRows");
-      // Inverted from the pair above because the default is on (#5694): off is the persisted
-      // decision, so it writes `false`, while on deletes the key and returns to the default.
-      if (hardLockThresholds !== undefined) config.codexMainAccountHardLockThresholds = { ...hardLockThresholds };
-      if (body.codexMainAccountHardLock === false) config.codexMainAccountHardLock = false;
-      else if (body.codexMainAccountHardLock === true) deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
-      if (hardLockFallback === null) deleteConfigTopLevelKey(config, "codexMainAccountHardLockFallback");
-      else if (hardLockFallback?.success) config.codexMainAccountHardLockFallback = hardLockFallback.data;
-      if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
-      else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
-      if (body.codexClientCompaction === true) config.codexClientCompaction = true;
-      else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(config, "codexClientCompaction");
-      if (compactionRouting === null) deleteConfigTopLevelKey(config, "compactionRouting");
-      else if (compactionRouting?.success) config.compactionRouting = compactionRouting.data;
-      if (compactionRecovery === null) deleteConfigTopLevelKey(config, "compactionRecovery");
-      else if (compactionRecovery?.success) config.compactionRecovery = compactionRecovery.data;
-      if (reasoningRetention === null) deleteConfigTopLevelKey(config, "reasoningRetention");
-      else if (reasoningRetention?.success) config.reasoningRetention = reasoningRetention.data;
-      // Null clears both phases; the GUI sends that when neither row names a model.
-      if (memoryModels === null) deleteConfigTopLevelKey(config, "memoryModels");
-      else if (memoryModels?.success) config.memoryModels = memoryModels.data;
-      if (quotaAutoRefreshChange) {
-        const { id, window, enabled } = quotaAutoRefreshChange;
-        const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
-        if (enabled) setting[window] = true;
-        else delete setting[window];
-        const all = { ...(config.codexQuotaAutoRefresh ?? {}) };
-        if (Object.keys(setting).length > 0) all[id] = setting;
-        else delete all[id];
-        if (Object.keys(all).length > 0) config.codexQuotaAutoRefresh = all;
-        else deleteConfigTopLevelKey(config, "codexQuotaAutoRefresh");
-      }
-      pickerIsEnabled = codexAccountPickerEnabled(config);
-      await settleConfigRoot(configRoot(), () => (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config));
-    } catch (error) {
-      if (previousSettings.hasCodexAutoStart) config.codexAutoStart = previousSettings.codexAutoStart;
-      else deleteConfigTopLevelKey(config, "codexAutoStart");
-      if (previousSettings.hasStreamMode) config.streamMode = previousSettings.streamMode;
-      else deleteConfigTopLevelKey(config, "streamMode");
-      if (previousSettings.hasAppOwnedMemoryBudgetMb) {
-        config.appOwnedMemoryBudgetMb = previousSettings.appOwnedMemoryBudgetMb;
-      } else deleteConfigTopLevelKey(config, "appOwnedMemoryBudgetMb");
-      if (previousSettings.hasCodexAccountNamespaces) {
-        config.codexAccountNamespaces = previousSettings.codexAccountNamespaces;
-      } else deleteConfigTopLevelKey(config, "codexAccountNamespaces");
-      if (previousSettings.hasCodexAccountPickerEnabled) {
-        config.codexAccountPickerEnabled = previousSettings.codexAccountPickerEnabled;
-      } else deleteConfigTopLevelKey(config, "codexAccountPickerEnabled");
-      if (previousSettings.hasCodexQuotaAutoRefresh) {
-        config.codexQuotaAutoRefresh = previousSettings.codexQuotaAutoRefresh;
-      } else deleteConfigTopLevelKey(config, "codexQuotaAutoRefresh");
-      if (previousSettings.hasShowCodexCredits) config.showCodexCredits = previousSettings.showCodexCredits;
-      else deleteConfigTopLevelKey(config, "showCodexCredits");
-      if (previousSettings.hasOauthOpenBrowser) {
-        config.oauthOpenBrowser = previousSettings.oauthOpenBrowser;
-      } else deleteConfigTopLevelKey(config, "oauthOpenBrowser");
-      if (previousSettings.hasUltraFastTier) {
-        config.ultraFastTier = previousSettings.ultraFastTier;
-      } else deleteConfigTopLevelKey(config, "ultraFastTier");
-      if (previousSettings.hasFastRows) {
-        config.fastRows = previousSettings.fastRows;
-      } else deleteConfigTopLevelKey(config, "fastRows");
-      if (previousSettings.hasCodexMainAccountHardLockThresholds) {
-        config.codexMainAccountHardLockThresholds = previousSettings.codexMainAccountHardLockThresholds;
-      } else deleteConfigTopLevelKey(config, "codexMainAccountHardLockThresholds");
-      if (previousSettings.hasCodexMainAccountHardLock) {
-        config.codexMainAccountHardLock = previousSettings.codexMainAccountHardLock;
-      } else deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
-      if (previousSettings.hasCodexMainAccountHardLockFallback) {
-        config.codexMainAccountHardLockFallback = previousSettings.codexMainAccountHardLockFallback;
-      } else deleteConfigTopLevelKey(config, "codexMainAccountHardLockFallback");
-      if (previousSettings.hasCodexDesktopAuthless) {
-        config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
-      } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
-      if (previousSettings.hasCodexClientCompaction) {
-        config.codexClientCompaction = previousSettings.codexClientCompaction;
-      } else deleteConfigTopLevelKey(config, "codexClientCompaction");
-      restoreCompactionRouting();
-      throw error;
-    }
+    });
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
@@ -1091,6 +1102,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     // only case that owes a config.toml rewrite.
     const webSearchEnabledBefore = config.webSearchSidecar?.enabled !== false;
     const visionEnabledBefore = config.visionSidecar?.enabled !== false;
+    let webSearchCandidate: OcxConfig["webSearchSidecar"];
     if (body.webSearch) {
       const pairTouched = body.webSearch.model !== undefined || body.webSearch.backend !== undefined || body.webSearch.anthropicInstance !== undefined;
       // Validate against the backend the caller SUBMITTED, across the whole
@@ -1116,7 +1128,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
           return jsonResponse(webSearchModelRejection("webSearch.model", effectiveBackend, effectiveModel, candidates), 400);
         }
       }
-      const webSearchCandidate = { ...config.webSearchSidecar };
+      webSearchCandidate = { ...config.webSearchSidecar };
       if (body.webSearch.anthropicInstance === null) delete webSearchCandidate.anthropicInstance;
       else if (isAnthropicInstanceId(body.webSearch.anthropicInstance)) webSearchCandidate.anthropicInstance = body.webSearch.anthropicInstance;
       if (typeof body.webSearch.model === "string") {
@@ -1194,38 +1206,41 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         if (body.webSearch.enabled) delete webSearchCandidate.enabled;
         else webSearchCandidate.enabled = false;
       }
-      config.webSearchSidecar = webSearchCandidate;
     }
+    const visionCandidate = { ...config.visionSidecar };
     if (body.vision) {
-      config.visionSidecar = { ...config.visionSidecar };
-      if (body.vision.anthropicInstance === null) delete config.visionSidecar.anthropicInstance;
-      else if (isAnthropicInstanceId(body.vision.anthropicInstance)) config.visionSidecar.anthropicInstance = body.vision.anthropicInstance;
+      if (body.vision.anthropicInstance === null) delete visionCandidate.anthropicInstance;
+      else if (isAnthropicInstanceId(body.vision.anthropicInstance)) visionCandidate.anthropicInstance = body.vision.anthropicInstance;
       if (typeof body.vision.model === "string") {
-        if (body.vision.model === "") delete config.visionSidecar.model;
-        else config.visionSidecar.model = body.vision.model;
+        if (body.vision.model === "") delete visionCandidate.model;
+        else visionCandidate.model = body.vision.model;
       }
-      if (body.vision.backend === null) delete config.visionSidecar.backend;
+      if (body.vision.backend === null) delete visionCandidate.backend;
       else if (body.vision.backend === "openai" || body.vision.backend === "anthropic"
         || body.vision.backend === "routed") {
-        config.visionSidecar.backend = body.vision.backend;
+        visionCandidate.backend = body.vision.backend;
       }
       if (typeof body.vision.maxDescriptionsPerTurn === "number") {
-        config.visionSidecar.maxDescriptionsPerTurn = body.vision.maxDescriptionsPerTurn;
+        visionCandidate.maxDescriptionsPerTurn = body.vision.maxDescriptionsPerTurn;
       }
       if (typeof body.vision.enabled === "boolean") {
         // `true` is the default — drop the key so disable/re-enable does not rewrite the file.
-        if (body.vision.enabled) delete config.visionSidecar.enabled;
-        else config.visionSidecar.enabled = false;
+        if (body.vision.enabled) delete visionCandidate.enabled;
+        else visionCandidate.enabled = false;
       }
       if (typeof body.vision.timeoutMs === "number") {
-        config.visionSidecar.timeoutMs = body.vision.timeoutMs;
+        visionCandidate.timeoutMs = body.vision.timeoutMs;
       }
       if (visionReasoningTouched) {
-        if (normalizedVisionReasoning === undefined) delete config.visionSidecar.reasoning;
-        else config.visionSidecar.reasoning = normalizedVisionReasoning;
+        if (normalizedVisionReasoning === undefined) delete visionCandidate.reasoning;
+        else visionCandidate.reasoning = normalizedVisionReasoning;
       }
     }
-    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
+    await settleConfigRoot(configRoot(), () => {
+      if (webSearchCandidate) config.webSearchSidecar = webSearchCandidate;
+      if (body.vision) config.visionSidecar = visionCandidate;
+      saveConfigPreservingClaudeCode(config);
+    });
     // Publish the changed attachment affordance to both the managed catalog and Codex cache.
     // Use the existing bounded catalog-only path after persistence, outside the config lock.
     const catalogRefresh = visionEnabledBefore !== (config.visionSidecar?.enabled !== false)
@@ -1293,14 +1308,16 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         : undefined;
     const targetError = shadowCallTargetError(config, candidateModel);
     if (targetError) return jsonResponse({ error: targetError }, 400);
-    config.shadowCallIntercept = { ...config.shadowCallIntercept };
-    if (typeof body.enabled === "boolean") config.shadowCallIntercept.enabled = body.enabled;
-    if (typeof body.model === "string") {
-      if (body.model === "") delete config.shadowCallIntercept.model;
-      else config.shadowCallIntercept.model = body.model;
-    }
-    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
-    const sci = config.shadowCallIntercept;
+    await settleConfigRoot(configRoot(), () => {
+      config.shadowCallIntercept = { ...config.shadowCallIntercept };
+      if (typeof body.enabled === "boolean") config.shadowCallIntercept.enabled = body.enabled;
+      if (typeof body.model === "string") {
+        if (body.model === "") delete config.shadowCallIntercept.model;
+        else config.shadowCallIntercept.model = body.model;
+      }
+      saveConfigPreservingClaudeCode(config);
+    });
+    const sci = config.shadowCallIntercept ?? {};
     return jsonResponse({
       ok: true,
       enabled: sci.enabled === true,
@@ -1321,24 +1338,26 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     const body = raw as { enabled?: unknown; model?: unknown };
     const shapeError = autoReviewOverrideConfigError(body, "body");
     if (shapeError) return jsonResponse({ error: shapeError }, 400);
-    const rollback = captureConfigTopLevelRollback(config, ["autoReviewOverride"]);
-    try {
-      config.autoReviewOverride = { ...config.autoReviewOverride };
-      if (typeof body.enabled === "boolean") config.autoReviewOverride.enabled = body.enabled;
-      if (typeof body.model === "string") {
-        const trimmed = body.model.trim();
-        if (trimmed === "") delete config.autoReviewOverride.model;
-        else config.autoReviewOverride.model = trimmed;
+    await settleConfigRoot(configRoot(), () => {
+      const rollback = captureConfigTopLevelRollback(config, ["autoReviewOverride"]);
+      try {
+        config.autoReviewOverride = { ...config.autoReviewOverride };
+        if (typeof body.enabled === "boolean") config.autoReviewOverride.enabled = body.enabled;
+        if (typeof body.model === "string") {
+          const trimmed = body.model.trim();
+          if (trimmed === "") delete config.autoReviewOverride.model;
+          else config.autoReviewOverride.model = trimmed;
+        }
+        (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      } catch (error) {
+        if (!(error instanceof ConfigWritePublishedError)) rollback();
+        throw error;
       }
-      await settleConfigRoot(configRoot(), () => (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config));
-    } catch (error) {
-      if (!(error instanceof ConfigWritePublishedError)) rollback();
-      throw error;
-    }
+    });
     // The catalog carries the reviewer stamps, so the new selector has to reach it now; the
     // disposition travels in the body like every other catalog-affecting route.
     const catalogRefresh = await convergeCodexCatalog();
-    const override = config.autoReviewOverride;
+    const override = config.autoReviewOverride ?? {};
     return jsonResponse({ ok: true, enabled: override.enabled === true, model: override.model ?? "", catalogRefresh });
   }
   return null;

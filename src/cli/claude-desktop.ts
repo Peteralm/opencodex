@@ -101,6 +101,9 @@ type DesktopApplyResult = {
   warning?: string;
   picker?: DesktopPickerStatus;
   delegated?: boolean;
+  desiredEnabled?: boolean;
+  saved?: boolean;
+  applied?: boolean;
   diagnostic?: import("../claude/desktop-first-party").InterceptSecretDiagnostic;
 };
 
@@ -243,6 +246,7 @@ async function applyConnectedDesktopProfile(
   connection: Extract<ClientConnectionState, { kind: "connected" }>,
   deps: ApplyProfileDeps,
 ): Promise<{ ok: boolean; path: string; reason?: string; warning?: string }> {
+  let committedIntent = false;
   try {
     const token = await settleConfigRoot(configRoot(), () => withClientLifecycleSync(() => withConfigMutationLockSync(() => {
       assertClientConnectionUnchanged(connection.value);
@@ -255,6 +259,7 @@ async function applyConnectedDesktopProfile(
       }
       const desired = setIntegrationEnabled("claude-desktop", true);
       if (!desired.ok) throw new Error("desktop_desired_state_write_failed");
+      committedIntent = true;
       return current;
     }), deps.lifecycleLockDeps));
     const baseUrl = normalizeHubOrigin(connection.value.serverUrl);
@@ -287,18 +292,20 @@ async function applyConnectedDesktopProfile(
     const warning = [fallbackWarning, policyWarning].filter(Boolean).join(" ");
     return { ok: true, path: result.path ?? "", ...(warning ? { warning } : {}) };
   } catch (error) {
+    if (error instanceof WindowsSecretAclSettleTimeoutError) return { ok: false, path: "", reason: "ca_unavailable",
+      ...(committedIntent ? { warning: "Desktop enable intent was saved; the remote gateway was not applied." } : {}) };
     const message = error instanceof Error ? error.message : "";
     return { ok: false, path: "", reason: /^[a-z][a-z0-9_]{1,100}$/.test(message) ? message : "desktop_apply_failed" };
   }
 }
 
 /** Persist the operator's Desktop mode choice; a failed marker save never undoes the apply. */
-function saveDesktopMode(mode: ClaudeDesktopMode, deps: ApplyProfileDeps): boolean {
+async function saveDesktopMode(mode: ClaudeDesktopMode, deps: ApplyProfileDeps): Promise<boolean> {
   try {
-    return withClientLifecycleSync(() => {
+    return await settleConfigRoot(configRoot(), () => withClientLifecycleSync(() => {
       const outcome = mutatePersistedConfig(current => recordClaudeDesktopMode(current, mode));
       return outcome.status !== "unavailable";
-    }, deps.lifecycleLockDeps);
+    }, deps.lifecycleLockDeps));
   } catch {
     return false;
   }
@@ -442,14 +449,14 @@ async function applyFirstPartyDesktop(
     }
     if (!removed.ok) {
       const restored = removed.changed || !applied.changed || await rollbackDesktopFirstPartySettled(getConfigDir(), rollback);
-      const modeSaved = !removed.changed || await settleConfigRoot(configRoot(), () => saveDesktopMode("first-party", deps));
+      const modeSaved = !removed.changed || await saveDesktopMode("first-party", deps);
       const warning = [restored ? "" : "first-party settings rollback did not complete",
         modeSaved ? "" : "first-party is active but its mode marker was not saved"].filter(Boolean).join("; ");
       return { ok: false, path: library.selectedProfilePath ?? "", reason: removed.kind === "cleanup_incomplete" ? "gateway_cleanup_incomplete" : `gateway_profile_active:${removed.reason ?? removed.kind}`,
         ...(warning ? { warning } : {}) };
     }
   }
-  const saved = await settleConfigRoot(configRoot(), () => saveDesktopMode("first-party", deps));
+  const saved = await saveDesktopMode("first-party", deps);
   return {
     ok: true,
     path: applied.path,
@@ -467,7 +474,7 @@ export async function applyDesktop(
   const result = await applyProfile(profile, target.mode, deps);
   if (!result.ok) return result;
   if (result.delegated) return result;
-  const modeSaved = await settleConfigRoot(configRoot(), () => saveDesktopMode("gateway", deps));
+  const modeSaved = await saveDesktopMode("gateway", deps);
   const warning = [result.warning, modeSaved ? "" : "desktop mode marker was not saved"].filter(Boolean).join(" ");
   // The gateway mode is committed before retiring first-party settings.
   const removed = await removeDesktopFirstPartySettled(loadConfig);
@@ -491,80 +498,90 @@ export async function applyProfile(
   if (connection.kind !== "disconnected") return { ok: false, path: "", reason: "client_connection_invalid" };
   // Explicit apply is an enable action. Persist intent before any Desktop write
   // so a process crash cannot leave a gateway profile that startup immediately removes.
-  const desired = await settleConfigRoot(configRoot(), () => setIntegrationEnabled("claude-desktop", true));
-  if (!desired.ok) return { ok: false, path: "", reason: desired.message };
-  const config = loadConfig();
-  const state = await buildClaudeDesktopState(config, profile);
-  await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(state.profile, config.claudeCode?.desktopProfile, connection, deps));
-  const live = await (deps.findLiveProxyImpl ?? findLiveProxy)();
-  assertNoClientDisconnectPending();
-  if (readClientConnectionState().kind !== "disconnected") throw new Error("client_connection_changed");
-  if (live) {
-    // #859: the Desktop alias reverse-map is process-local. Applying through the
-    // serving process installs the map there; a local-only write leaves the
-    // daemon unable to decode aliases, and the provider rejects them (400).
-    const post = deps.postApplyImpl ?? (async (m: Desktop3pConfigMode, p: DesktopProfile) =>
-      runtimeRequest<{ ok?: boolean; path?: string; error?: string; saved?: boolean; warning?: string; picker?: DesktopPickerStatus }>(
-        "/api/claude-desktop/apply",
-        // The daemon's config may be older than what we just saved, so the
-        // profile travels with the request instead of being re-read there.
-        { method: "POST", body: JSON.stringify({ mode: m, profile: p }) },
-      ));
-    try {
-      const applied = await post(mode, state.profile);
-      if (applied.ok === false) return { ok: false, path: applied.path ?? "", reason: applied.error ?? "daemon apply failed" };
-      // Partial success: Desktop was written but the applied marker was not
-      // persisted. Pass the degradation up instead of reporting a clean apply.
-      const partial = (applied as { saved?: boolean; warning?: string }).saved === false;
-      const warning = (applied as { warning?: string }).warning;
-      return {
-        ok: true,
-        path: applied.path ?? "",
-        picker: applied.picker,
-        delegated: true,
-        ...(warning ? { warning } : partial ? { warning: "applied marker was not saved" } : {}),
-      };
-    } catch (error) {
-      return { ok: false, path: "", reason: error instanceof Error ? error.message : String(error) };
+  let committedIntent = false, savedProfile = false;
+  try {
+    const desired = await settleConfigRoot(configRoot(), () => setIntegrationEnabled("claude-desktop", true));
+    if (!desired.ok) return { ok: false, path: "", reason: desired.message };
+    committedIntent = true;
+    const config = loadConfig();
+    const state = await buildClaudeDesktopState(config, profile);
+    await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(state.profile, config.claudeCode?.desktopProfile, connection, deps));
+    savedProfile = true;
+    const live = await (deps.findLiveProxyImpl ?? findLiveProxy)();
+    assertNoClientDisconnectPending();
+    if (readClientConnectionState().kind !== "disconnected") throw new Error("client_connection_changed");
+    if (live) {
+      // #859: the Desktop alias reverse-map is process-local. Applying through the
+      // serving process installs the map there; a local-only write leaves the
+      // daemon unable to decode aliases, and the provider rejects them (400).
+      const post = deps.postApplyImpl ?? (async (m: Desktop3pConfigMode, p: DesktopProfile) =>
+        runtimeRequest<{ ok?: boolean; path?: string; error?: string; saved?: boolean; warning?: string; picker?: DesktopPickerStatus }>(
+          "/api/claude-desktop/apply",
+          // The daemon's config may be older than what we just saved, so the
+          // profile travels with the request instead of being re-read there.
+          { method: "POST", body: JSON.stringify({ mode: m, profile: p }) },
+        ));
+      try {
+        const applied = await post(mode, state.profile);
+        if (applied.ok === false) return { ok: false, path: applied.path ?? "", reason: applied.error ?? "daemon apply failed" };
+        // Partial success: Desktop was written but the applied marker was not
+        // persisted. Pass the degradation up instead of reporting a clean apply.
+        const partial = (applied as { saved?: boolean; warning?: string }).saved === false;
+        const warning = (applied as { warning?: string }).warning;
+        return {
+          ok: true,
+          path: applied.path ?? "",
+          picker: applied.picker,
+          delegated: true,
+          ...(warning ? { warning } : partial ? { warning: "applied marker was not saved" } : {}),
+        };
+      } catch (error) {
+        return { ok: false, path: "", reason: error instanceof Error ? error.message : String(error) };
+      }
     }
+    const allModels = await fetchAllModels(config);
+    // The toggle can persist OFF while fetchAllModels was awaiting (same race the
+    // management writers fence). Re-read persisted intent immediately before the
+    // writer; a lost race is a discriminated skip, not a write.
+    assertNoClientDisconnectPending();
+    if (readClientConnectionState().kind !== "disconnected") throw new Error("client_connection_changed");
+    if (!claudeDesktopIntegrationEnabledNow()) {
+      return { ok: false, path: "", reason: "desired_state_changed" };
+    }
+    const routed = filterCatalogVisibleModels(allModels, config).map(model => ({
+      provider: model.provider,
+      id: model.id,
+      contextWindow: model.contextWindow,
+    }));
+    const result = await settleConfigRoot(configRoot(), () => writeDesktop3pConfig(
+      config.port ?? 10100,
+      [...desktopVisibleNativeSlugs(config)],
+      routed,
+      config.apiKeys?.[0]?.key,
+      mode,
+      state.profile,
+      nativeContextLimits(config),
+      deps.lifecycleLockDeps,
+    ));
+    let stateWarning: string | undefined;
+    if (result.written) {
+      try { await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(state.profile, state.profile, connection, deps, { fingerprint: result.fingerprint })); }
+      catch { stateWarning = "gateway applied but its committed mode/profile state was not saved"; }
+    }
+    const policyState = (deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)();
+    const warning = [result.written ? claudeDesktopPolicyWarning(policyState) : undefined, stateWarning].filter(Boolean).join(" ");
+    return {
+      ok: result.written,
+      path: result.path,
+      reason: result.reason,
+      ...(warning ? { warning } : {}),
+    };
+  } catch (error) {
+    if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+    return { ok: false, path: "", reason: "ca_unavailable", diagnostic: { stage: "ca", cause: "ETIMEDOUT" },
+      ...(committedIntent ? { desiredEnabled: true, saved: savedProfile, applied: false,
+        warning: `Desktop enable intent${savedProfile ? " and profile were" : " was"} saved; Desktop was not applied.` } : {}) };
   }
-  const allModels = await fetchAllModels(config);
-  // The toggle can persist OFF while fetchAllModels was awaiting (same race the
-  // management writers fence). Re-read persisted intent immediately before the
-  // writer; a lost race is a discriminated skip, not a write.
-  assertNoClientDisconnectPending();
-  if (readClientConnectionState().kind !== "disconnected") throw new Error("client_connection_changed");
-  if (!claudeDesktopIntegrationEnabledNow()) {
-    return { ok: false, path: "", reason: "desired_state_changed" };
-  }
-  const routed = filterCatalogVisibleModels(allModels, config).map(model => ({
-    provider: model.provider,
-    id: model.id,
-    contextWindow: model.contextWindow,
-  }));
-  const result = await settleConfigRoot(configRoot(), () => writeDesktop3pConfig(
-    config.port ?? 10100,
-    [...desktopVisibleNativeSlugs(config)],
-    routed,
-    config.apiKeys?.[0]?.key,
-    mode,
-    state.profile,
-    nativeContextLimits(config),
-    deps.lifecycleLockDeps,
-  ));
-  let stateWarning: string | undefined;
-  if (result.written) {
-    try { await settleConfigRoot(configRoot(), () => saveLocalDesktopProfile(state.profile, state.profile, connection, deps, { fingerprint: result.fingerprint })); }
-    catch { stateWarning = "gateway applied but its committed mode/profile state was not saved"; }
-  }
-  const policyState = (deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)();
-  const warning = [result.written ? claudeDesktopPolicyWarning(policyState) : undefined, stateWarning].filter(Boolean).join(" ");
-  return {
-    ok: result.written,
-    path: result.path,
-    reason: result.reason,
-    ...(warning ? { warning } : {}),
-  };
 }
 
 async function handleClaudeDesktopPickerCommand(

@@ -1,3 +1,4 @@
+import { mirrorDesiredEnabledOntoSnapshot, persistDesktopModeField, persistDesktopProfileField } from "./claude-desktop-config-writers";
 import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../../config/paths";
 import { WindowsSecretAclSettleTimeoutError } from "../../lib/windows-secret-acl";
 import { ensureManagementClaudeIntercept, interceptStartRefusal, interceptStatus } from "./claude-intercept-routes";
@@ -105,66 +106,6 @@ let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | n
 
 class GrokApplyBusyError extends Error {}
 
-/**
- * Mirror a durable desired-state transition onto the long-lived server snapshot.
- *
- * `setIntegrationEnabled` writes DISK only. The server reuses one `config` object
- * for every request, so leaving it stale makes the native GET report the opposite
- * of what was just persisted, and makes any later whole-snapshot save (the Desktop
- * profile PUT does exactly that) write the stale value back over the transition.
- * ON is the ABSENCE of the key, matching `setIntegrationEnabled`'s on-disk shape.
- */
-function mirrorDesiredEnabledOntoSnapshot(config: OcxConfig, client: "claude-desktop", enabled: boolean): void {
-  const integrations = { ...(config.clientIntegrations ?? {}) };
-  if (enabled) delete integrations[client];
-  else integrations[client] = false;
-  if (Object.keys(integrations).length === 0) deleteConfigTopLevelKey(config, "clientIntegrations");
-  else config.clientIntegrations = integrations;
-}
-
-/**
- * Persist ONLY `claudeCode.desktopProfile`, field-scoped, against the CURRENT
- * on-disk config.
- *
- * `saveConfigPreservingClaudeCode(ctx.config)` writes the whole long-lived server
- * snapshot. On the apply path that snapshot still carries the `clientIntegrations`
- * it was loaded with, so a save right after `setIntegrationEnabled("claude-desktop",
- * true)` carried the stale OFF back over the enable and made the route cancel its
- * own apply. Mutating one field under the config-mutation lock cannot regress an
- * unrelated key another writer just committed.
- */
-async function persistDesktopProfileField(
-  config: OcxConfig,
-  desktopProfile: NonNullable<OcxConfig["claudeCode"]>["desktopProfile"],
-): Promise<{ ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" }> {
-  const outcome = await settleConfigRoot(configRoot(), () => mutatePersistedConfig(persisted => {
-    persisted.claudeCode = { ...(persisted.claudeCode ?? {}), desktopProfile };
-    return { changed: true, value: structuredClone(persisted.claudeCode) };
-  }));
-  // Only mirror into memory once the durable write actually landed; an
-  // `unavailable` outcome must not leave the snapshot claiming a saved profile.
-  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  adoptPersistedClaudeCode(config, outcome.value);
-  return { ok: true };
-}
-
-async function persistDesktopModeField(
-  config: OcxConfig,
-  desktopMode: "first-party" | "gateway",
-): Promise<{ ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" }> {
-  const { recordClaudeDesktopMode } = await import("../../claude/desktop-first-party");
-  const outcome = await settleConfigRoot(configRoot(), () => mutatePersistedConfig(persisted => {
-    const mutation = recordClaudeDesktopMode(persisted, desktopMode);
-    return { changed: mutation.changed, value: structuredClone(persisted.claudeCode) };
-  }));
-  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  // First-party apply ends here — no profile-marker write follows — so without
-  // adopting, live diverges from the armed baseline and a later whole-config
-  // save reads that divergence as a pending mutation and stomps hand edits.
-  adoptPersistedClaudeCode(config, outcome.value);
-  return { ok: true };
-}
-
 export function grokApplyFlightSnapshot(): { currentBytes: number; highWaterBytes: number; active: number } {
   return {
     currentBytes: grokApplyFlight?.bytes ?? 0,
@@ -260,6 +201,14 @@ export async function injectionModelView(config: OcxConfig, routed: readonly Cat
 }
 
 export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise<Response | null> {
+  try { return await handleAgentSettingsRoutesImpl(ctx); }
+  catch (error) {
+    if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+    return jsonResponse({ error: "Could not save settings", code: "write_failed", diagnostic: { stage: "ca", cause: "ETIMEDOUT" } }, 500);
+  }
+}
+
+async function handleAgentSettingsRoutesImpl(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
 
   /** Best-effort Desktop 3P config auto-reconcile when providers change. */
@@ -465,76 +414,78 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       return jsonResponse({ error: `config.toml not readable at ${activeCodexConfigPath()}` }, 502);
     }
     const { acquireConfigWriteLock, releaseConfigWriteLock, configWriteLockFailureMessage } = await import("../../codex/config-write-lock");
+    const { runCodexFeaturesCommand } = await import("../../cli/v2");
     const configWriteLock = needsCodexConfigWrites ? await acquireConfigWriteLock(activeCodexConfigPath()) : null;
     if (configWriteLock !== null && !configWriteLock.ok) {
       return jsonResponse({ error: configWriteLockFailureMessage(configWriteLock), retryable: configWriteLock.error === "locked" }, 502);
     }
     const heldWriteLock = configWriteLock !== null && configWriteLock.ok ? configWriteLock.handle : undefined;
     try {
-    if (requestedFlag !== undefined || wantsThreads) {
-    const targetFlag = requestedFlag ?? isMultiAgentV2Enabled();
-    let toggle = deps.toggleCodexMultiAgentV2;
-    if (!toggle) {
-      const { runCodexFeaturesCommand } = await import("../../cli/v2");
-      toggle = (enabled, env, validate) => runCodexFeaturesCommand(enabled ? "enable" : "disable", "multi_agent_v2", env, validate);
-      }
-      const result = transitionMultiAgentV2(targetFlag, toggle, {
-        ...(wantsThreads ? { threadLimit: body.maxConcurrentThreadsPerSession as number } : {}),
-        heldConfigWriteLock: heldWriteLock,
-      });
-      if (!result.ok) return jsonResponse({ error: `multi_agent_v2 transition failed: ${result.error}`, ...(result.retryable === false ? { retryable: false } : {}) }, 502);
-      if (result.changed && result.threadLimit !== null) warnings.push(`Thread limit ${result.threadLimit} preserved for ${targetFlag ? "v2" : "v1"}.`);
-    }
-    if (wantsMode) {
-      if (mode === "default") deleteConfigTopLevelKey(config, "multiAgentMode");
-      else config.multiAgentMode = mode;
-      await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
-      warnings.push(`Multi-agent mode set to '${mode}'. Applies to new sessions.`);
-    }
-    if (wantsKeepNative) {
-      if (body.keepNativeChatGptOnV1 === true) config.keepNativeChatGptOnV1 = true;
-      else deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
-      await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
-      warnings.push(body.keepNativeChatGptOnV1 === true
-        ? (effectiveMode === "v2"
-          ? "ChatGPT-native models stay on v1 while other models use v2. Applies to new sessions."
-          : "keepNativeChatGptOnV1 is stored but inactive until multi-agent mode is v2. Applies to new sessions.")
-        : "ChatGPT-native models follow the selected v1/v2/base surface. Applies to new sessions.");
-    }
-    // Written after the mode, so a landed acknowledgement implies the mode write it was
-    // sent with already landed. The converse does not hold: this writer throws rather than
-    // reporting, exactly as the mode write above it does, so a failure here surfaces the
-    // mode change with the advisory still raised. That is the benign direction — the
-    // operator is asked again — and it is why this is not claimed as a transaction.
-    if (wantsAdvisoryAck && body.multiAgentSurfaceAdvisoryAcknowledged === true) {
-      config.multiAgentSurfaceAdvisoryVersion = MULTI_AGENT_SURFACE_ADVISORY_VERSION;
-      await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
-    }
-    // New-key scalar writes: each writer is individually atomic, so apply them in
-    // sequence after the transition. A failure here is a persistence failure (the
-    // writers' ok:false result or a throw from the underlying atomic write helper),
-    // reported as 502 naming the failed key plus the writes that already landed.
-    // NOTE: do not name that helper literally here — tests/providers/xai/grok-writer-boundary.test.ts
-    // asserts this route file contains no direct write primitive, and matches on the
-    // symbol name even inside a comment.
-    const scalarWrites: Array<{ field: string; run: () => { ok: true; changed: boolean } | { ok: false; error: string } }> = [];
-    if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => setAgentsEnabled(body.agentsEnabled as boolean | null, undefined, heldWriteLock) });
-    if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => setAgentsMaxDepth(body.agentsMaxDepth as number | null, undefined, heldWriteLock) });
-    if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => setSubagentDeveloperInstructions(body.subagentDeveloperInstructions as string | null, undefined, heldWriteLock) });
-    if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => setMultiAgentModeHintText(body.multiAgentModeHintText as string | null, undefined, heldWriteLock) });
-    const landed: string[] = [];
-    for (const write of scalarWrites) {
-      try {
-        const result = write.run();
-        if (!result.ok) {
-          return jsonResponse({ error: `writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
+      const writeRefusal = await settleConfigRoot(configRoot(), () => {
+        if (requestedFlag !== undefined || wantsThreads) {
+          const targetFlag = requestedFlag ?? isMultiAgentV2Enabled();
+          const toggle = deps.toggleCodexMultiAgentV2
+            ?? ((enabled, env, validate) => runCodexFeaturesCommand(enabled ? "enable" : "disable", "multi_agent_v2", env, validate));
+          const result = transitionMultiAgentV2(targetFlag, toggle, {
+            ...(wantsThreads ? { threadLimit: body.maxConcurrentThreadsPerSession as number } : {}),
+            heldConfigWriteLock: heldWriteLock,
+          });
+          if (!result.ok) return jsonResponse({ error: `multi_agent_v2 transition failed: ${result.error}`, ...(result.retryable === false ? { retryable: false } : {}) }, 502);
+          if (result.changed && result.threadLimit !== null) warnings.push(`Thread limit ${result.threadLimit} preserved for ${targetFlag ? "v2" : "v1"}.`);
         }
-        landed.push(write.field);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return jsonResponse({ error: `writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
-      }
-    }
+        if (wantsMode) {
+          if (mode === "default") deleteConfigTopLevelKey(config, "multiAgentMode");
+          else config.multiAgentMode = mode;
+          saveConfigPreservingClaudeCode(config);
+          warnings.push(`Multi-agent mode set to '${mode}'. Applies to new sessions.`);
+        }
+        if (wantsKeepNative) {
+          if (body.keepNativeChatGptOnV1 === true) config.keepNativeChatGptOnV1 = true;
+          else deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
+          saveConfigPreservingClaudeCode(config);
+          warnings.push(body.keepNativeChatGptOnV1 === true
+            ? (effectiveMode === "v2"
+              ? "ChatGPT-native models stay on v1 while other models use v2. Applies to new sessions."
+              : "keepNativeChatGptOnV1 is stored but inactive until multi-agent mode is v2. Applies to new sessions.")
+            : "ChatGPT-native models follow the selected v1/v2/base surface. Applies to new sessions.");
+        }
+        // Written after the mode, so a landed acknowledgement implies the mode write it was
+        // sent with already landed. The converse does not hold: this writer throws rather than
+        // reporting, exactly as the mode write above it does, so a failure here surfaces the
+        // mode change with the advisory still raised. That is the benign direction — the
+        // operator is asked again — and it is why this is not claimed as a transaction.
+        if (wantsAdvisoryAck && body.multiAgentSurfaceAdvisoryAcknowledged === true) {
+          config.multiAgentSurfaceAdvisoryVersion = MULTI_AGENT_SURFACE_ADVISORY_VERSION;
+          saveConfigPreservingClaudeCode(config);
+        }
+        // New-key scalar writes: each writer is individually atomic, so apply them in
+        // sequence after the transition. A failure here is a persistence failure (the
+        // writers' ok:false result or a throw from the underlying atomic write helper),
+        // reported as 502 naming the failed key plus the writes that already landed.
+        // NOTE: do not name that helper literally here — tests/providers/xai/grok-writer-boundary.test.ts
+        // asserts this route file contains no direct write primitive, and matches on the
+        // symbol name even inside a comment.
+        const scalarWrites: Array<{ field: string; run: () => { ok: true; changed: boolean } | { ok: false; error: string } }> = [];
+        if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => setAgentsEnabled(body.agentsEnabled as boolean | null, undefined, heldWriteLock) });
+        if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => setAgentsMaxDepth(body.agentsMaxDepth as number | null, undefined, heldWriteLock) });
+        if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => setSubagentDeveloperInstructions(body.subagentDeveloperInstructions as string | null, undefined, heldWriteLock) });
+        if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => setMultiAgentModeHintText(body.multiAgentModeHintText as string | null, undefined, heldWriteLock) });
+        const landed: string[] = [];
+        for (const write of scalarWrites) {
+          try {
+            const result = write.run();
+            if (!result.ok) {
+              return jsonResponse({ error: `writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
+            }
+            landed.push(write.field);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return jsonResponse({ error: `writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
+          }
+        }
+        return null;
+      });
+      if (writeRefusal) return writeRefusal;
     } finally {
       if (heldWriteLock) releaseConfigWriteLock(heldWriteLock);
     }
@@ -751,17 +702,19 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       return jsonResponse({ error: "syncCodexSubagentDefaults requires a supported Codex reasoning effort" }, 400);
     }
 
-    config.multiAgentGuidanceEnabled = nextEnabled;
-    if (nextSyncCodexSubagentDefaults) config.syncCodexSubagentDefaults = true;
-    else deleteConfigTopLevelKey(config, "syncCodexSubagentDefaults");
-    if (nextModel) config.injectionModel = nextModel;
-    else deleteConfigTopLevelKey(config, "injectionModel");
-    if (nextEffort) config.injectionEffort = nextEffort;
-    else deleteConfigTopLevelKey(config, "injectionEffort");
-    if (nextPrompt) config.injectionPrompt = nextPrompt;
-    else deleteConfigTopLevelKey(config, "injectionPrompt");
+    await settleConfigRoot(configRoot(), () => {
+      config.multiAgentGuidanceEnabled = nextEnabled;
+      if (nextSyncCodexSubagentDefaults) config.syncCodexSubagentDefaults = true;
+      else deleteConfigTopLevelKey(config, "syncCodexSubagentDefaults");
+      if (nextModel) config.injectionModel = nextModel;
+      else deleteConfigTopLevelKey(config, "injectionModel");
+      if (nextEffort) config.injectionEffort = nextEffort;
+      else deleteConfigTopLevelKey(config, "injectionEffort");
+      if (nextPrompt) config.injectionPrompt = nextPrompt;
+      else deleteConfigTopLevelKey(config, "injectionPrompt");
 
-    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
+      saveConfigPreservingClaudeCode(config);
+    });
     return jsonResponse({
       ok: true,
       multiAgentGuidanceEnabled: multiAgentGuidanceEnabled(config),
@@ -818,19 +771,21 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
     const projected = projectConfigRebaseProvenance(draft);
     touched.push("configRebaseProvenance");
-    const rollback = captureConfigTopLevelRollback(config, touched);
-    try {
-      for (const key of touched) {
-        if (Object.hasOwn(projected, key)) Object.defineProperty(config, key, {
-          value: projected[key], writable: true, enumerable: true, configurable: true,
-        });
-        else deleteConfigTopLevelKey(config, key);
+    await settleConfigRoot(configRoot(), () => {
+      const rollback = captureConfigTopLevelRollback(config, touched);
+      try {
+        for (const key of touched) {
+          if (Object.hasOwn(projected, key)) Object.defineProperty(config, key, {
+            value: projected[key], writable: true, enumerable: true, configurable: true,
+          });
+          else deleteConfigTopLevelKey(config, key);
+        }
+        (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      } catch (error) {
+        rollback();
+        throw error;
       }
-      await settleConfigRoot(configRoot(), () => (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config));
-    } catch (error) {
-      rollback();
-      throw error;
-    }
+    });
     return jsonResponse({
       ok: true,
       effortCap: config.effortCap ?? null,
@@ -902,11 +857,13 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         return jsonResponse({ error: "pollMs must be an integer between 5000 and 600000" }, 400);
       }
     }
-    if (nextModels !== undefined) config.subagentModelFallback = nextModels;
-    else deleteConfigTopLevelKey(config, "subagentModelFallback");
-    if (nextPollMs !== undefined) config.subagentModelFallbackPollMs = nextPollMs;
-    else deleteConfigTopLevelKey(config, "subagentModelFallbackPollMs");
-    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
+    await settleConfigRoot(configRoot(), () => {
+      if (nextModels !== undefined) config.subagentModelFallback = nextModels;
+      else deleteConfigTopLevelKey(config, "subagentModelFallback");
+      if (nextPollMs !== undefined) config.subagentModelFallbackPollMs = nextPollMs;
+      else deleteConfigTopLevelKey(config, "subagentModelFallbackPollMs");
+      saveConfigPreservingClaudeCode(config);
+    });
     return jsonResponse({
       ok: true,
       models: config.subagentModelFallback ?? [],
@@ -946,9 +903,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // cannot grow config.json without bound.
     const excluded = [...new Set(raw as string[])].sort();
     if (excluded.length > 2000) return jsonResponse({ error: "excluded list is too large" }, 400);
-    if (excluded.length === 0) deleteConfigTopLevelKey(config, "grokExcludedModels");
-    else config.grokExcludedModels = excluded;
-    await settleConfigRoot(configRoot(), () => saveConfigPreservingClaudeCode(config));
+    await settleConfigRoot(configRoot(), () => {
+      if (excluded.length === 0) deleteConfigTopLevelKey(config, "grokExcludedModels");
+      else config.grokExcludedModels = excluded;
+      saveConfigPreservingClaudeCode(config);
+    });
     return jsonResponse({ ok: true, excluded });
   }
 
@@ -1047,10 +1006,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const runtimePort = managementInferencePort(ctx);
       return jsonResponse({ ok: true, ...saved, port: runtimePort });
     } catch (error) {
+      if (error instanceof WindowsSecretAclSettleTimeoutError) return jsonResponse({ error: "Could not save settings", code: "write_failed", diagnostic: { stage: "ca", cause: "ETIMEDOUT" } }, 500);
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
   }
   if (url.pathname === "/api/claude-desktop/apply" && req.method === "POST") {
+    let committedIntent = false, savedProfile = false, pickerDisabled = false;
     try {
       // #859: the CLI delegates here so the registry is built in the serving
       // process. `mode` selects the Desktop mode: `first-party` (default when the
@@ -1102,6 +1063,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         const desired = await withFirstPartySecretsSettled(configRoot(), () => setIntegrationEnabled("claude-desktop", true));
         if (!desired.ok) return "path" in desired ? jsonResponse({ ...desired, code: desired.reason }, 500)
           : jsonResponse({ error: desired.message }, desired.retryable ? 409 : 500);
+        committedIntent = true;
         mirrorDesiredEnabledOntoSnapshot(config, "claude-desktop", true);
         const { pickerPreferenceOn, pickerStatusFor, runPickerTransition } = await import("./claude-desktop-picker-routes");
         // The whole switch runs under the picker lock, in today's order: env first, then gateway cleanup.
@@ -1174,6 +1136,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const { setIntegrationEnabled, claudeDesktopIntegrationEnabled } = await import("../../codex/desired-state");
       const desired = await settleConfigRoot(configRoot(), () => setIntegrationEnabled("claude-desktop", true));
       if (!desired.ok) return jsonResponse({ error: desired.message }, desired.retryable ? 409 : 500);
+      committedIntent = true;
       // Disk now says ON; the reused server snapshot must agree, or the native
       // GET reports OFF and a later whole-snapshot save undoes this transition.
       mirrorDesiredEnabledOntoSnapshot(config, "claude-desktop", true);
@@ -1189,8 +1152,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           error: `Claude Desktop profile could not be saved (${profileSaved.reason}); nothing was applied.`,
           saved: false,
           applied: false,
+          desiredEnabled: true,
         }, profileSaved.reason === "conflict" ? 409 : 500);
       }
+      savedProfile = true;
       const { writeDesktop3pConfig } = await import("../../claude/desktop-3p");
       const { desktopVisibleNativeSlugs } = await import("../../codex/catalog");
       const routed = state.models
@@ -1216,6 +1181,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         }
         // Picker mode belongs to first-party: stop terminating claude.ai before the gateway lands.
         const pickerOff = await ops.disableLocked({ persist: false });
+        pickerDisabled = true;
         const result = await settleConfigRoot(configRoot(), () => (deps.writeDesktop3pConfig ?? writeDesktop3pConfig)(
           managementInferencePort({ config: latest, deps }),
           [...desktopVisibleNativeSlugs(latest)],
@@ -1226,7 +1192,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           nativeContextLimits(latest),
         ));
         if (!result.written) return { response: jsonResponse({ error: result.reason ?? "Claude Desktop apply failed", saved: true, path: result.path }, 500) };
-        const committed = await settleConfigRoot(configRoot(), () => persistCommittedDesktopGateway(config, state.profile, result.fingerprint));
+        const committed = await settleConfigRoot(configRoot(), () => persistCommittedDesktopGateway(config, state.profile, result.fingerprint)).catch(error => {
+          if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+          return { ok: false, reason: "unavailable" } as const;
+        });
         const modeWarning = committed.ok ? undefined : `Gateway applied, but its mode/profile state was not saved (${committed.reason}).`;
         // The durable marker describes the committed gateway even if old-mode cleanup fails.
         const firstPartyRemoved = await removeDesktopFirstPartySettled(loadConfig);
@@ -1265,6 +1234,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       });
     } catch (error) {
       rethrowManagementBodyTooLarge(error);
+      if (error instanceof WindowsSecretAclSettleTimeoutError) return jsonResponse({
+        error: "Config-directory ACL settlement timed out", code: "write_failed",
+        diagnostic: { stage: "ca", cause: "ETIMEDOUT" },
+        ...(committedIntent ? { desiredEnabled: true, saved: savedProfile, applied: false,
+          warning: `Desktop enable intent${savedProfile ? " and profile were" : " was"} saved; Desktop was not applied.${pickerDisabled ? " Picker disable was already attempted." : ""}` } : {}),
+      }, 500);
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
   }
@@ -1402,6 +1377,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       config.claudeCode = liveClaudeCode;
       return jsonResponse({ ok: true, modelBindings: readInterceptBindings(config.claudeCode) });
     } catch (error) {
+      if (error instanceof WindowsSecretAclSettleTimeoutError) return jsonResponse({ error: "Could not save settings", code: "write_failed", diagnostic: { stage: "ca", cause: "ETIMEDOUT" } }, 500);
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
   }
@@ -1658,9 +1634,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
             persisted.claudeCode = block;
             return { changed: true, value: structuredClone(block) };
             }));
-          } catch { return jsonResponse({ error: "Claude settings rollback failed", code: "write_failed",
+          } catch { return jsonResponse({ error: "Claude settings rollback failed", code: "write_failed", cliFirstParty: true,
             warnings: ["settings_rollback_incomplete"] }, 500); }
-          if (rollback.status === "unavailable") return jsonResponse({ error: "Claude settings rollback failed", code: "write_failed",
+          if (rollback.status === "unavailable") return jsonResponse({ error: "Claude settings rollback failed", code: "write_failed", cliFirstParty: true,
             warnings: ["settings_rollback_incomplete"] }, 500);
           adoptPersistedClaudeCode(config, rollback.value);
         }
@@ -1943,15 +1919,17 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         else delete next.modelMap;
       }
     }
-    if (body.fastMode !== undefined) config.fastMode = nextFastMode;
     // Stamps the auth-mode migration sentinel on EVERY persist of this block. Without it,
     // choosing Auto (which DELETES authMode) or merely toggling Claude on (App.tsx PUTs
     // `{enabled}` alone and creates the block) would be converted into a sticky manual
     // subscription by the next startServer, with no way back.
     const { commitClaudeCodeBlock } = await import("../../claude/claude-code-block");
-    commitClaudeCodeBlock(config, next);
     const { saveConfigPreservingClaudeCode: save } = await import("../../config");
-    await settleConfigRoot(configRoot(), () => save(config));
+    await settleConfigRoot(configRoot(), () => {
+      if (body.fastMode !== undefined) config.fastMode = nextFastMode;
+      commitClaudeCodeBlock(config, next);
+      save(config);
+    });
     const warnings: string[] = [];
     // authMode changes must reconcile the injected system env too: switching back to
     // Subscription has to remove the opencodex-owned dummy ANTHROPIC_AUTH_TOKEN

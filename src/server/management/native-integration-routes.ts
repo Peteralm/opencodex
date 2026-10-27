@@ -679,15 +679,20 @@ function pickerCleanupNote(picker: DesktopPickerStatus): string {
 
 /** Record which Desktop mode is applied; `false` when the config file could not be updated. */
 async function persistDesktopModeMarker(config: ManagementContext["config"], desktopMode: ClaudeDesktopMode): Promise<boolean> {
-  const outcome = await settleConfigRoot(configRoot(), () => mutatePersistedConfig(persisted => {
-    const result = recordClaudeDesktopMode(persisted, desktopMode);
-    return { changed: result.changed, value: structuredClone(persisted.claudeCode) };
-  }));
-  if (outcome.status === "unavailable") return false;
-  adoptPersistedClaudeCode(config, outcome.value);
-  // Pin the committed leaf: an unarmed baseline can otherwise retain a stale live mode.
-  recordClaudeDesktopMode(config, desktopMode);
-  return true;
+  try {
+    const outcome = await settleConfigRoot(configRoot(), () => mutatePersistedConfig(persisted => {
+      const result = recordClaudeDesktopMode(persisted, desktopMode);
+      return { changed: result.changed, value: structuredClone(persisted.claudeCode) };
+    }));
+    if (outcome.status === "unavailable") return false;
+    adoptPersistedClaudeCode(config, outcome.value);
+    // Pin the committed leaf: an unarmed baseline can otherwise retain a stale live mode.
+    recordClaudeDesktopMode(config, desktopMode);
+    return true;
+  } catch (error) {
+    if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+    return false;
+  }
 }
 
 let claudeDesktopToggleFlight: Promise<Response> | null = null;
@@ -841,7 +846,10 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
           nativeContextLimits(latest),
         ));
         if (!result.written) return postCommitRefusal(500, "claude-desktop", "write_failed", "Claude Desktop apply failed.", { desiredEnabled: latestDesiredEnabled });
-        const committed = await settleConfigRoot(configRoot(), () => persistCommittedDesktopGateway(ctx.config, latest.claudeCode?.desktopProfile, result.fingerprint));
+        const committed = await settleConfigRoot(configRoot(), () => persistCommittedDesktopGateway(ctx.config, latest.claudeCode?.desktopProfile, result.fingerprint)).catch(error => {
+          if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+          return { ok: false, reason: "unavailable" } as const;
+        });
         const stateWarning = committed.ok ? "" : " The committed gateway mode/profile state was not saved.";
         const removed = await removeDesktopFirstPartySettled(loadConfig);
         if (!removed.ok) return postCommitRefusal(500, "claude-desktop", "write_failed", "Gateway applied, but first-party settings cleanup did not complete." + stateWarning, { desiredEnabled: latestDesiredEnabled });
