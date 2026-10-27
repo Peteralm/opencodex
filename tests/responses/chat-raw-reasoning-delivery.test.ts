@@ -67,13 +67,14 @@ afterEach(() => {
   if (home) removeTreeWithRetry(home);
 });
 
-function config(direct: boolean, hideRawReasoning = false): OcxConfig {
+function config(direct: boolean, hideRawReasoning = false, providerExtra: Rec = {}): OcxConfig {
   const value: OcxConfig = {
     port: 0, defaultProvider: "fixture",
     providers: { fixture: {
       adapter: "openai-chat", baseUrl: "https://chat-reasoning.invalid/v1", apiKey: "fixture-key",
       models: ["gpt-4o"], liveModels: false, hideRawReasoning,
       ...(inlineTags ? { inlineThinkTagModels: ["gpt-4o"] } : {}),
+      ...providerExtra,
     } },
     protocols: { rollout: { directEncoders: direct } },
   };
@@ -99,11 +100,11 @@ function frames(text: string): Rec[] {
     .map(line => JSON.parse(line.slice(6)));
 }
 
-async function dispatch(direct: boolean, stream: boolean, extra: Rec = {}, hideRaw = false) {
+async function dispatch(direct: boolean, stream: boolean, extra: Rec = {}, hideRaw = false, headers: Rec = {}, providerExtra: Rec = {}) {
   const logCtx: RequestLogContext = { model: "", provider: "" };
   const response = await handleChatCompletions(new Request("http://localhost/v1/chat/completions", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chatBody({ stream, ...extra })),
-  }), config(direct, hideRaw), logCtx);
+    method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(chatBody({ stream, ...extra })),
+  }), config(direct, hideRaw, providerExtra), logCtx);
   expect(response.status).toBe(200);
   const text = await response.text();
   expect(protocolTraceForRequest(logCtx, logCtx.attempts)?.responsePath).toEqual(
@@ -212,6 +213,12 @@ describe("Chat raw reasoning delivery without upstream opt-in (#7750)", () => {
     });
     test(`${lane}: explicit enabled wins over none effort`, async () => {
       expect(await dispatch(direct, stream, { reasoning: { enabled: true, effort: "none" } })).toBe(THOUGHT);
+    });
+    test(`${lane}: a configured Droid default effort is not a caller hide request`, async () => {
+      // The exported Droid header supplies a generation default, applied after routing; it must not
+      // be read back as the caller's delivery choice.
+      expect(await dispatch(direct, stream, {}, false,
+        { "x-opencodex-droid-default-effort": "none" }, { reasoningEfforts: ["none", "low", "high"] })).toBe(THOUGHT);
     });
   }
 
