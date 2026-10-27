@@ -40,6 +40,16 @@ describe("search source-list text ownership", () => {
     expect(result.text).toBe("Answer\n\n- Set `mode:fast` before retrying");
     expect(result.sources).toEqual([{ url: "https://example.com" }]);
   });
+  test("treats URI-like text inside a double-backtick code span as a note", async () => {
+    const result = await parse("Answer\nSources:\n- https://example.com\n- Set ``mode:fast`` before retrying");
+    expect(result.text).toBe("Answer\n\n- Set ``mode:fast`` before retrying");
+    expect(result.sources).toEqual([{ url: "https://example.com" }]);
+  });
+  test("keeps a note before a bare URL that starts its own list item", async () => {
+    const result = await parse("Answer\nSources:\n- https://example.com\n- Keep this note\n- https://example.org");
+    expect(result.text).toBe("Answer\n\n- Keep this note");
+    expect(result.sources).toEqual([{ url: "https://example.com" }, { url: "https://example.org" }]);
+  });
   test("still consumes a title followed immediately by its URL", async () => {
     const result = await parse("Answer\nSources:\n- A title\nhttps://example.com\n\nConclusion");
     expect(result.text).toBe("Answer\n\nConclusion");

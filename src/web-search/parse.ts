@@ -156,8 +156,9 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
       continue;
     }
     const httpMatch = raw.match(URL_RE);
-    // URI-like text inside inline code, such as `mode:fast`, is prose rather than a citation.
-    const m = httpMatch ?? raw.replace(/`[^`]*`/g, span => " ".repeat(span.length)).match(URI_LIKE_RE);
+    // URI-like text inside an inline code span of any backtick run, such as `mode:fast`, is prose
+    // rather than a citation. HTTP(S) URLs keep their citation meaning even when code-formatted.
+    const m = httpMatch ?? raw.replace(/(`+)(.+?)\1/g, span => " ".repeat(span.length)).match(URI_LIKE_RE);
     if (!m) {
       // A list-ish line with no URL may be a title whose URL is on the next line. Only treat it as a
       // pending title when it looks like a list item; otherwise it's prose → stop. A second list item
@@ -176,12 +177,15 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     if (!url) { break; }
     const inlinePrefix = raw.slice(0, m.index);
     const inlineTitle = cleanTitle(inlinePrefix);
-    // A self-titled citation does not prove that the preceding bullet was its title.
-    if (pendingTitle !== null && inlineTitle) keptNotes.push(pendingIndex);
+    // A self-titled citation, or a URL that starts its own list item, does not prove that the
+    // preceding bullet was its title. Only an unmarked continuation line pairs with it.
+    const startsListItem = /^(?:[-*+>]|\d+[.)])\s/.test(raw);
+    const pairsWithPending = pendingTitle !== null && !inlineTitle && !startsListItem;
+    if (pendingTitle !== null && !pairsWithPending) keptNotes.push(pendingIndex);
     consumedSourceLine = true;
     lastConsumed = i;
     // Title: text before the URL on this line, else a buffered title from a preceding line.
-    const title = inlineTitle || (pendingTitle ? cleanTitle(pendingTitle) : "");
+    const title = inlineTitle || (pairsWithPending ? cleanTitle(pendingTitle!) : "");
     pendingTitle = null;
     if (seen.has(url)) continue;
     if (appendSafeWebSearchSource(sources, title ? { url, title } : { url })) seen.add(url);
