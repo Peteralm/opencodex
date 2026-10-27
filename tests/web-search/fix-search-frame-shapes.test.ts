@@ -27,6 +27,26 @@ describe("search SSE field shapes", () => {
     ]));
     expect(result).toEqual({ text: "First. Second.", sources: [{ url: citation.url, title: citation.title }] });
   });
+  test("keeps a part's deltas when only another part sent its done text", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "First. " },
+      { type: "response.output_text.done", output_index: 0, content_index: 0, text: "First. " },
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "Second." },
+      { type: "response.completed", response: { output: [
+        null, { type: "message", content: [{ type: "output_text", text: "Second." }] },
+      ] } },
+    ]));
+    expect(result).toEqual({ text: "First. Second.", sources: [] });
+  });
+  test("uses each part's done text over its own deltas", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "draft" },
+      { type: "response.output_text.done", output_index: 0, content_index: 0, text: "First. " },
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "Second." },
+      { type: "response.completed" },
+    ]));
+    expect(result).toEqual({ text: "First. Second.", sources: [] });
+  });
   test("keeps the completed text when malformed entries leave no streamed text", async () => {
     const result = await parseSidecarSSE(response([{ type: "response.completed", response: { output: [
       { type: "message", content: "not-an-array" }, { type: "message", content: [{ type: "output_text", text: "kept" }] },

@@ -32,6 +32,25 @@ interface OutputItem {
 }
 /** Completed output text and citations; `incomplete` marks skipped malformed entries. */
 type CompletedOutput = WebSearchResult & { incomplete: boolean };
+/** Streamed text for one `output_text` content part. */
+interface StreamedPart {
+  delta: string;
+  done: string | null;
+}
+
+/** Key a streamed text event by its content part; events without valid indexes share one part. */
+function streamedPartKey(data: Record<string, unknown>): string {
+  const output = data.output_index;
+  const content = data.content_index;
+  return Number.isInteger(output) && Number.isInteger(content) ? `${output}:${content}` : "unindexed";
+}
+
+/** Join parts in arrival order, using each part's done text when present and its deltas otherwise. */
+function assembleStreamedText(parts: Map<string, StreamedPart>): string {
+  let text = "";
+  for (const part of parts.values()) text += part.done?.trim() ? part.done : part.delta;
+  return text;
+}
 
 // Keep this compatibility export for non-Responses sidecar executors and bounded error bodies.
 export const MAX_SIDECAR_RESPONSE_BYTES = 64 * 1024;
@@ -232,8 +251,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   const seen = new Set<string>();
   // Holder object — fields are mutated inside the closure, so they can't live as narrowed locals.
   const acc: {
-    deltaText: string;
-    doneText: string;
+    parts: Map<string, StreamedPart>;
     final: CompletedOutput | null;
     streamSources: WebSearchSource[];
     error: string | null;
@@ -241,14 +259,21 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
     terminalEvent: boolean;
     limitReached: boolean;
   } = {
-    deltaText: "",
-    doneText: "",
+    parts: new Map(),
     final: null,
     streamSources: [],
     error: null,
     decodedChars: 0,
     terminalEvent: false,
     limitReached: false,
+  };
+
+  /** The accumulator for the content part that `data` belongs to. */
+  const streamedPart = (data: Record<string, unknown>): StreamedPart => {
+    const key = streamedPartKey(data);
+    let part = acc.parts.get(key);
+    if (!part) { part = { delta: "", done: null }; acc.parts.set(key, part); }
+    return part;
   };
 
   const acceptDecodedChars = (count: number): boolean => {
@@ -287,10 +312,13 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
     const data = parsed as Record<string, unknown>;
     const type = typeof data.type === "string" ? data.type : undefined;
     if (type === "response.output_text.delta" && typeof data.delta === "string") {
-      if (acceptDecodedChars(data.delta.length)) acc.deltaText += data.delta;
+      if (acceptDecodedChars(data.delta.length)) streamedPart(data).delta += data.delta;
     } else if (type === "response.output_text.done" && typeof data.text === "string") {
       // The `done` event carries the full, authoritative text for one content part.
-      if (acceptDecodedChars(data.text.length)) acc.doneText += data.text;
+      if (acceptDecodedChars(data.text.length)) {
+        const part = streamedPart(data);
+        part.done = (part.done ?? "") + data.text;
+      }
     } else if (type === "response.completed" || type === "response.done") {
       acc.terminalEvent = true;
       const resp = data.response as { output?: OutputItem[] } | undefined;
@@ -355,7 +383,8 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
 
   // Prefer the authoritative completed output[], then the done text, then accumulated deltas.
   // A completed output with malformed entries may be partial, so streamed text wins when present.
-  const streamedText = acc.doneText.trim() ? acc.doneText : acc.deltaText;
+  // Each content part contributes its done text, or its deltas when the done event never arrived.
+  const streamedText = assembleStreamedText(acc.parts);
   const completedText = acc.final?.text.trim() ? acc.final.text : "";
   const text = acc.final?.incomplete && streamedText.trim()
     ? streamedText
