@@ -18,11 +18,35 @@ Judgment precedes local hosted-image display projection, which replaces image ca
 canonical SSE buffered for JSON callers is judged after restoration and before that projection too.
 Accepted bodies retain response tool ownership and preinspection identity, with stale representation
 headers removed after decoding. Existing non-replayable responses bypass inspection.
-Translated Chat, runTurn and native Chat terminal owners stay outside this guard; streaming text-only
-completion with required tools remains open. No second SSE reader or post-output replay is added.
+Translated Chat, runTurn and native Chat terminal owners stay outside this buffered guard.
+The streaming sibling below uses the existing inspector and rewrite readers; it never replays output.
 `src/lib/errors.ts` declares the code and `src/bridge/errors.ts` preserves it through combo error
 formatting without overriding cyber-policy precedence. Regression coverage lives in
 `tests/server/server-combo-required-tool-contract.test.ts`, including the 151-tool call/result cycle.
+
+## Streaming required-tool contract
+
+For native `openai-responses` combo children requested with `stream: true`,
+`src/server/responses/combo-required-tool-stream.ts` applies the same explicit required/named
+contract. Completed item events and terminal snapshots can satisfy it; a call start alone cannot.
+Missing calls turn `response.completed` into `response.failed` with
+`required_tool_contract_unsatisfied`, retaining response identity, output and usage.
+The client rewrite judges restored calls before continuation observers and hosted-image display.
+The existing raw inspector judges outbound aliases with catalog-aware default-namespace normalization before reporting a terminal or persisting
+completion; both eager and tee relays retain their readers and cancellation owners.
+Provider-owned custom calls retain their call-ID-prefix ownership. Hosted effects, unknown items,
+and the local web-search bridge make the verdict non-replayable, including sparse terminal snapshots.
+
+Only this mandatory native contract extends preflight to hold known reasoning frames. It keeps the
+existing aggregate byte/chunk caps and commits on text, tool events, opaque/unknown events or either
+cap. A missing-call terminal held before commitment becomes the existing 502 combo failure; another
+target remains subject to eligibility, consent and budgets. After commitment the typed failed
+terminal remains with that child. Lifecycle snapshots with output and failed/incomplete snapshots
+with output commit conservatively; only a checked missing-call terminal with harmless text/reasoning
+may be discarded. Cancellation wakes a pending preflight read and is checked before parent success.
+Auto/none, unknown contracts, direct native routes, Chat and runTurn keep their terminal owners.
+Coverage: `tests/server/server-combo-stream-required-tool.test.ts` and
+`tests/routing/combo-required-tool-stream-preflight.test.ts`.
 
 ## Combo streaming commit boundary
 
@@ -37,7 +61,7 @@ about the same bytes. With `replayReadErrors`, the preflight reports the stage i
 resend gate decides. A `response.created` whose snapshot already carries output items is not a
 prelude.
 
-- a non-control Responses event begins client-visible output or a tool/action item, after which the
+- a non-control Responses event (apart from the held mandatory-tool reasoning prelude above) begins client-visible output or a tool/action item, after which the
   target is committed and cross-target replay is forbidden;
 - a `response.failed` terminal arrives first, in which case the terminal is converted back through
   the ordinary bounded combo-failure classifier and may advance to the next declared target;

@@ -7,6 +7,8 @@ import type { RequestLogContext } from "../request-log";
 import { carryResponseToolOwnership } from "./response-tool-ownership";
 import { createSseInspector } from "../relay";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
+import { REQUIRED_TOOL_CONTRACT_CODE } from "../../lib/errors";
+import { requiredToolReasoningPrelude } from "./combo-required-tool-stream";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
 // Keep retained object count proportional to the same byte budget used by the
@@ -123,7 +125,9 @@ function retryableZeroOutputTerminal(payload: unknown): boolean {
   };
   if (bareErrorIsRetryable(event)) return true;
   if (event.type === "response.failed") {
-    const code = (event.response as { error?: { code?: unknown } } | undefined)?.error?.code;
+    const error = (event.response as { error?: { code?: unknown; retryable?: unknown } } | undefined)?.error;
+    const code = error?.code;
+    if (code === REQUIRED_TOOL_CONTRACT_CODE && error?.retryable === false) return false;
     return !(typeof code === "string" && NON_REPLAYABLE_FAILED_CODES.has(code));
   }
   if (event.type !== "response.incomplete") return false;
@@ -285,7 +289,7 @@ export async function preflightComboStreamResponse(
   response: Response,
   logCtx: RequestLogContext,
   retryableTerminal: (payload: unknown) => boolean = retryableZeroOutputTerminal,
-  options?: { allowMissingContentType?: boolean; replayReadErrors?: boolean },
+  options?: { allowMissingContentType?: boolean; replayReadErrors?: boolean; requiredToolPrelude?: boolean; signal?: AbortSignal },
 ): Promise<ComboStreamPreflightResult> {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   const isEventStream = contentType.includes("text/event-stream")
@@ -295,6 +299,9 @@ export async function preflightComboStreamResponse(
   }
 
   const reader = response.body.getReader();
+  const cancelRead = () => { reader.cancel(options?.signal?.reason).catch(() => undefined); };
+  if (options?.signal?.aborted) cancelRead();
+  else options?.signal?.addEventListener("abort", cancelRead, { once: true });
   const buffered: Uint8Array[] = [];
   let bufferedBytes = 0;
   let outputCommitted = false;
@@ -315,7 +322,19 @@ export async function preflightComboStreamResponse(
         && !Array.isArray(payload) && (payload as { type?: unknown }).type === "error";
       // A zero-output bare error is terminal evidence. Explicit client errors stay
       // committed; unknown and retryable upstream failures may advance the combo.
-      if (comboStreamPayloadCommitsOutput(payload) && !matchedBareError) outputCommitted = true;
+      const heldReasoning = options?.requiredToolPrelude && requiredToolReasoningPrelude(payload);
+      if (comboStreamPayloadCommitsOutput(payload) && !matchedBareError && !heldReasoning) outputCommitted = true;
+      if (options?.requiredToolPrelude && payload && typeof payload === "object") {
+        const event = payload as { type?: unknown; response?: { output?: unknown; error?: { code?: unknown; retryable?: unknown } } };
+        const output = event.response?.output;
+        const contractFailure = event.type === "response.failed" && event.response?.error?.code === REQUIRED_TOOL_CONTRACT_CODE
+          && event.response.error.retryable !== false && Array.isArray(output) && output.every(item =>
+            item !== null && typeof item === "object" && !Array.isArray(item)
+            && ["message", "reasoning"].includes((item as { type: string }).type));
+        // Other lifecycle/terminal snapshots can hide effects too. Only our checked contract
+        // failure may discard a terminal-only text snapshot that was held in its entirety.
+        if (output !== undefined && (!Array.isArray(output) || output.length > 0) && !contractFailure) outputCommitted = true;
+      }
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
       if (retryable) retryableTerminalPayload = payload as Record<string, unknown>;
     },
@@ -324,9 +343,11 @@ export async function preflightComboStreamResponse(
 
   try {
     for (;;) {
+      options?.signal?.throwIfAborted();
       let next: Awaited<ReturnType<typeof reader.read>>;
       try {
         next = await reader.read();
+        options?.signal?.throwIfAborted();
       } catch (error) {
         if (!options?.replayReadErrors) throw error;
         // The native relay still owns post-header transport failures. Preserve
@@ -372,6 +393,7 @@ export async function preflightComboStreamResponse(
       }
     }
   } finally {
+    options?.signal?.removeEventListener("abort", cancelRead);
     inspector.dispose();
   }
 }
