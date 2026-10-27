@@ -5,5 +5,7 @@
   "responses-sidecar-usage.test.ts": "responses",
   "google-vertex-key-project.test.ts": "adapters/google",
   "provider-quota-abliteration.test.ts": "providers",
-  "command-code-plan-denial.test.ts": "providers"
+  "command-code-plan-denial.test.ts": "providers",
+  "anthropic-affinity-restart.test.ts": "adapters/anthropic",
+  "anthropic-affinity-store.test.ts": "adapters/anthropic"
 }

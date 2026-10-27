@@ -470,6 +470,23 @@ than a promise that a route is eligible; explicit rollout opt-outs still apply.
 
 The shared conversation-key precedence is implemented by `src/oauth/session-affinity-key.ts` and re-exported as `anthropicSessionKeyFromParts`; Anthropic routing semantics remain owned here. [Generic OAuth affinity](generic-account-pool.md#conversation-affinity) uses independent request-local receipts.
 
+### Durable session affinity
+
+`src/oauth/anthropic-session-affinity-store.ts` lazily hydrates a versioned `anthropic-affinity-<instance-digest>.json`
+under the current config home before affinity selection. Each row contains only a domain-separated SHA-256
+session digest, opaque account ID, last-use timestamp and hashed persistent login identity. Legacy accounts
+without `loginId` retain runtime-only affinity. Token refresh preserves the fence; replacement login,
+removal/re-add, pause and reauthentication invalidate it. Invalid, oversized, future and expired rows are ignored;
+the newest 2,000 entries survive, with a 24-hour idle lifetime. A restored binding precedes the startup active
+preference; an explicit runtime selection clears bindings and persists the reset.
+
+Temporary throttle and model-route/family detours retain a valid original binding even if the admission pause
+expires before commit, and refresh its idle timestamp. Shared-quota and entitlement refusal invalidation remains
+explicit. Structural writes use the config ACL settlement barrier and private atomic publisher; timestamp-only
+updates coalesce for at most one second, with a best-effort shutdown flush. Failures emit identifier-free warnings
+and preserve the previous snapshot. `tests/adapters/anthropic/anthropic-affinity-restart.test.ts` and
+`tests/adapters/anthropic/anthropic-affinity-store.test.ts` exercise routing and persistence boundaries.
+
 ## JEV advisory publication
 
 While a live JEV combo enables quota signals, auth-store load/persist and accepted quota producer

@@ -12,7 +12,7 @@ import { clearAllAnthropicFamilyQuota, anthropicModelQuotaFor, anthropicModelPer
  * Intentionally narrower than the Codex pool: no mid-session quota rotation,
  * soft-avoid ladders, or probe leases. Anthropic OAuth is ToS-sensitive.
  *
- * Affinity is process-local (lost on restart). Cooldown uses Retry-After when present, else
+ * Affinity survives restart in a private digest-only snapshot. Cooldown uses Retry-After when present, else
  * the reset time of whichever rate-limit window upstream reports as rejected, else a default
  * backoff. Classified entitlement/billing 403s use a ten-minute default cooldown.
  * Token refresh failures retain the existing store needsReauth policy.
@@ -46,6 +46,7 @@ import { configuredAnthropicInstance, isAnthropicInstanceId, type AnthropicInsta
 import { resolveAnthropicAccountPoolConfig } from "./anthropic-pool-config";
 import { anthropicPoolKey } from "./pool-kernel";
 import type { GenerationContext } from "../lib/state-store-sweeper";
+import { AnthropicSessionAffinityStore, anthropicAffinityDigest, AFFINITY_IDLE_TTL_MS, MAX_AFFINITY_ENTRIES } from "./anthropic-session-affinity-store";
 
 /**
  * The read side of a `Headers` object, so a caller can pass the live upstream response's
@@ -57,8 +58,6 @@ export type AnthropicRateLimitHeaders = Pick<Headers, "get">;
 /** Backoff only when upstream supplies no usable deadline. */
 const DEFAULT_COOLDOWN_MS = 60_000;
 const ACCOUNT_REFUSAL_COOLDOWN_MS = 10 * 60_000;
-const AFFINITY_IDLE_TTL_MS = 24 * 60 * 60_000;
-const MAX_AFFINITY_ENTRIES = 2_000;
 const MAX_AFFINITY_COMPONENT_BYTES = 512;
 const UNKNOWN_USAGE_SCORE = 100;
 const DEFAULT_AUTO_SWITCH_THRESHOLD = 80;
@@ -130,11 +129,6 @@ interface AnthropicAccountHold {
   until: number;
   quota: boolean;
   resetAt?: number;
-}
-
-interface AffinityEntry {
-  accountId: string;
-  lastUsedAt: number;
 }
 
 function normalizeAffinityComponent(value: string | null | undefined): string {
@@ -372,7 +366,8 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   // methods carry no ambient disk authority; physical consumers recheck their captured config/target.
   function admitted(config: OcxConfig): boolean { return configuredAnthropicInstance(config, instance) === instance; }
   const upstreamHealth = new RoutingMap<string, AccountHealth>();
-  const sessionAffinity = new RoutingMap<string, AffinityEntry>();
+  const sessionAffinity = new AnthropicSessionAffinityStore(instance);
+  const affinityKey = (key: string | null | undefined) => anthropicAffinityDigest(instance, normalizeAffinityComponent(key));
   // Undefined means this runtime has not admitted a selection yet; null means consumed.
   // The startup baseline comes from the authoritative store, never a second persisted pin.
   let manualPreference: OAuthAccountSelection | null | undefined;
@@ -532,7 +527,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     clearAnthropicRatePauses();
     clearAnthropicFamilyQuota();
     clearAnthropicCooldownGenerations();
-    sessionAffinity.clear();
+    sessionAffinity.resetMemory();
     manualPreference = undefined;
     manualSelectionGeneration++;
     quorumCache = null;
@@ -1013,7 +1008,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
 
     // A manual choice is a one-dispatch preference, not a lower-priority quota hint.
     // Consume it only after admission commits, so a failed token lookup cannot spend it.
-    if (manualPreference) {
+    if (manualPreference && !sessionAffinity.get(affinityKey(sessionKey))) {
       if (manualPreference.accountId !== set.activeAccountId || manualPreference.revision !== set.selectionRevision) {
         manualPreference = null;
       } else {
@@ -1026,7 +1021,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
       }
     }
 
-    const key = normalizeAffinityComponent(sessionKey);
+    const key = affinityKey(sessionKey);
     if (key) {
       const affined = sessionAffinity.get(key);
       if (affined && now - affined.lastUsedAt <= AFFINITY_IDLE_TTL_MS) {
@@ -1034,6 +1029,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
         const stillUsable = stillThere && !isCooled(affined.accountId, now)
           && isPoolCredentialUsable(affined.accountId, now);
         if (stillUsable && eligible.includes(affined.accountId) && (!model || !anthropicModelExhausted(affined.accountId, model))) {
+          sessionAffinity.set(key, { ...affined, lastUsedAt: now });
           return { accountId: affined.accountId, reason: "affinity", routePosition: decision?.position };
         }
         // A model route may exclude a healthy binding only for this request. Keep it for
@@ -1134,7 +1130,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     accountId: string,
     now = Date.now(),
   ): void {
-    const key = normalizeAffinityComponent(sessionKey);
+    const key = affinityKey(sessionKey);
     if (!key || !normalizeAffinityComponent(accountId)) return;
     sessionAffinity.set(key, { accountId, lastUsedAt: now });
     pruneExpiredAffinity(now);
@@ -1309,16 +1305,14 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
         if (picked !== accountId) seedPoolRotationAccount(poolKey, accountId);
         notePoolRotationSuccess(poolKey, accountId, limit);
       }
-      const key = normalizeAffinityComponent(options.sessionKey);
+      const key = affinityKey(options.sessionKey);
       const bound = key ? sessionAffinity.get(key) : undefined;
-      const eligibleAtCommit = options.routeDecision && bound ? getEligibleAnthropicAccounts() : [];
-      const preserveExcludedAffinity = options.routeDecision && bound && bound.accountId !== accountId
-        && Date.now() - bound.lastUsedAt <= AFFINITY_IDLE_TTL_MS
-        && eligibleAtCommit.includes(bound.accountId)
-        && !routeCandidates(eligibleAtCommit, options.routeDecision).includes(bound.accountId);
-      const preservePausedAffinity = bound && (anthropicRatePauseUntil(bound.accountId) !== undefined
-        || anthropicFamilyRejected(bound.accountId, options.model));
-      if (!preserveExcludedAffinity && !preservePausedAffinity) bindAnthropicSessionAffinity(options.sessionKey, accountId);
+      // A temporary alternate is never evidence against an established account. Shared
+      // quota/entitlement refusals and operator resets explicitly remove the binding.
+      const preserveBinding = bound && Date.now() - bound.lastUsedAt <= AFFINITY_IDLE_TTL_MS
+        && !isCooled(bound.accountId, Date.now()) && isPoolCredentialUsable(bound.accountId, Date.now());
+      if (preserveBinding) sessionAffinity.set(key, { ...bound, lastUsedAt: Date.now() });
+      else bindAnthropicSessionAffinity(options.sessionKey, accountId);
     }
     if (manualPreference === undefined || (manualPreference?.accountId === expectedSelection.accountId
       && manualPreference.revision === expectedSelection.revision)) manualPreference = null;
@@ -1397,7 +1391,10 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   }
 
   // Pause changes eligibility, not health. Do not reset cooldowns or cancel sent turns.
-  function onPause(): void { quorumCache = null; }
+  function onPause(): void {
+    quorumCache = null;
+    for (const [key] of sessionAffinity) sessionAffinity.get(key); // Persist invalidated pauses/reauthentication.
+  }
   // A threshold write must fence in-flight automatic proposals, but it does not
   // revoke an operator's one-dispatch choice. Rebase only that still-owned choice;
   // an intervening account change clears it, so an ABA selection is not resurrected.
@@ -1410,7 +1407,9 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   // Any non-policy selection generation supersedes the pending one-shot choice.
   // Threshold mutations rebase it first, before this generic notification runs.
   function onSelection(event: Parameters<Parameters<typeof subscribeAccountSelections>[0]>[0]): void {
-    if (event.provider !== PROVIDER || event.kind !== "oauth" || !manualPreference) return;
+    if (event.provider !== PROVIDER || event.kind !== "oauth") return;
+    for (const [key] of sessionAffinity) sessionAffinity.get(key);
+    if (!manualPreference) return;
     const current = captureOAuthAccountSelection(PROVIDER);
     if (current?.accountId !== manualPreference.accountId
       || current.revision !== manualPreference.revision) manualPreference = null;
