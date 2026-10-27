@@ -243,6 +243,8 @@ Kilo CLI, VS Code, JetBrains는 전역 설정을 공유합니다. 이 연동은 
 
 Kilo는 이 전역 파일을 모두 병합합니다. 다른 후보 파일에도 `provider.opencodex`가 있으면 상태에 충돌 파일을 표시하고 적용과 교체를 거부합니다. 연동을 켜기 전에 해당 파일에서 `provider.opencodex`를 제거하세요. 이미 소유한 파일의 블록은 충돌 중에도 비활성화할 수 있습니다. 읽을 수 없거나 안전하지 않은 후보 파일도 쓰기를 막습니다.
 
+OpenCodex는 이 후보 파일을 JSONC로 읽습니다. `//` 한 줄 주석은 CR, LF, CRLF 줄바꿈에서 끝나므로, 어떤 줄바꿈으로 저장한 파일이든 주석 뒤의 설정을 그대로 읽습니다.
+
 관리하는 부분은 OpenCode V1 형식의 `provider.opencodex`(`npm`, `options`, `models`)뿐입니다. OpenCode V2의 `providers` 키는 내보내지 않습니다. 대신 모델별 추론 선택지는 프로바이더 블록 안의 변형 맵으로, OpenCode 내보내기와 같은 유효 정규 메타데이터에서 기록됩니다. `$schema`, `model`, `enabled_providers`, MCP 등의 키는 사용자가 관리합니다. 적용한 뒤 Kilo에서 `opencodex/<provider/model>`을 선택하세요.
 
 루프백에서는 `options.apiKey`로 `{env:OPENCODEX_KILO_API_KEY}`를 사용합니다. 루프백이 아닌 바인드에서는 인증을 `options.headers["x-opencodex-api-key"]`로 옮기며 실제 키를 저장하지 않습니다. 적용 시 전역 파일 전체를 보기 좋은 JSON으로 다시 쓰므로 다른 키의 주석과 후행 쉼표는 보존되지 않습니다. Kilo는 자동 카탈로그 갱신 대상입니다. `ocx sync`, `POST /api/sync`, 표시 여부·프로바이더·프리셋 변경은 다른 클라이언트와 같은 소유 블록만 갱신하는 안전한 규칙으로 소유한 Kilo 블록을 갱신하며, 새 Kilo 세션이 갱신된 파일을 읽습니다.
@@ -304,5 +306,3 @@ GitHub Copilot 데스크톱 앱에서 opencodex를 OpenAI 호환 모델 프로�
 행과 기본값이 함께 제거되며, 되돌리기는 저장된 행과 기본값을 함께 복원합니다.
 
 Factory Droid는 `~/.factory/settings.json`(Windows에서는 `%USERPROFILE%\.factory\settings.json`)을 사용합니다. `ocx integration client enable --client droid`로 명시적으로 활성화한 다음 `/model`에서 사용자 지정 모델을 선택하세요. 관리되는 항목에는 키가 없으며 루프백에서만 동작합니다. 비활성화하면 관리되는 항목이 제거되고, Undo는 저장된 원본 바이트를 복원합니다. 기존 `config.json`에 OpenCodex 항목이 있거나 `settings.local.json`이 `customModels`를 덮어쓰면 활성화 전에 충돌을 해결하세요. [Factory BYOK 문서](https://docs.factory.ai/model-independence/byok)를 참고하세요.
-
-JSONC 클라이언트 설정은 `//` 주석 뒤를 포함하여 CR, LF, CRLF 줄바꿈을 지원합니다.
