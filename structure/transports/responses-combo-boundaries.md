@@ -28,7 +28,10 @@ formatting without overriding cyber-policy precedence. Regression coverage lives
 
 For native `openai-responses` combo children requested with `stream: true`,
 `src/server/responses/combo-required-tool-stream.ts` applies the same explicit required/named
-contract. Completed item events and terminal snapshots can satisfy it; a call start alone cannot.
+contract against the adapter's final outbound body. Authorized hosted-image substitutions replace
+the client declaration and selector before judgment: `required` accepts the declared
+`image_generation_call`, while hosted non-function selectors retain their terminal owner.
+Completed item events and terminal snapshots can satisfy it; a call start alone cannot.
 Missing calls turn `response.completed` into `response.failed` with
 `required_tool_contract_unsatisfied`, retaining response identity, output and usage.
 The client rewrite judges restored calls before continuation observers and hosted-image display.
@@ -51,7 +54,8 @@ terminal remains with that child. Lifecycle snapshots with output and failed/inc
 with output commit conservatively; only a checked missing-call terminal with harmless text/reasoning
 may be discarded. Cancellation wakes a pending read; every exit clears the hold timer and checks cancellation before parent success.
 Auto/none, unknown contracts, direct native routes, Chat and runTurn keep their terminal owners.
-Coverage: `tests/server/server-combo-stream-required-tool.test.ts` and
+Coverage: `tests/server/server-combo-stream-required-tool.test.ts`,
+`tests/server/server-combo-stream-hosted-tool-contract.test.ts` (hosted substitutions, eager/tee), and
 `tests/routing/combo-required-tool-stream-preflight.test.ts`.
 
 ## Combo streaming commit boundary

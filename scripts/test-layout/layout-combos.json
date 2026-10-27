@@ -1,3 +1,4 @@
 {
-  "combo-cooldown-reprobe.test.ts": "codex-integration"
+  "combo-cooldown-reprobe.test.ts": "codex-integration",
+  "server-combo-stream-hosted-tool-contract.test.ts": "server"
 }

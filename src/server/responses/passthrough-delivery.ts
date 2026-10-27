@@ -839,7 +839,7 @@ export async function deliverPassthroughResponse(
       const requiredStreamGuard = options.comboAttempt && clientRequestedStream === true
         && (options.inboundWire === undefined || options.inboundWire === "responses")
         && route.provider.adapter === "openai-responses" && !isNonReplayableResponse(upstreamResponse)
-        ? createComboRequiredToolStreamGuard(parsed._rawBody, providerExecutedCallTypes,
+        ? createComboRequiredToolStreamGuard(nativeExchange.outboundRequestBody, providerExecutedCallTypes,
           requiredStreamEvidence, normalizeRequiredToolItem)
         : undefined;
       // The factory creates independent raw/client state with one tool identity resolver.
