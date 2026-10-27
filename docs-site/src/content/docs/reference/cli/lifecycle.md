@@ -924,7 +924,8 @@ Then rerun `ocx service uninstall` from the original account to finish cleanup, 
 `ocx service status`. Access-denied start/stop commands name their corresponding elevated
 `schtasks` command. Scheduler failures use stable diagnostics and exit codes rather than
 echoing localized child stderr, which may use a different Windows code page. An absent or
-unreadable task after a failed delete is not classified as a confirmed access denial.
+unreadable task after a failed delete keeps exit code 1 alone from confirming an access
+denial; recognized access-denied text from the delete is still classified as one.
 
 On Windows, creating the Task Scheduler entry requires elevation. Recognized localized
 access-denied text keeps the existing guidance path. If that text is unreadable, the fallback
