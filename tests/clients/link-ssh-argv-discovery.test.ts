@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { windowsOcxArgv, windowsNativeArgv, windowsChildHttpArgv, powershellArgv, windowsScriptData } from "../../src/link/remote-windows";
+import { windowsOcxArgv, windowsNativeArgv, windowsChildHttpArgv, powershellArgv, windowsScriptData, windowsScriptHelperSource, OCX_JOB_SOURCE } from "../../src/link/remote-windows";
 import { quoteRemote, REMOTE_OCX_SCRIPT, remoteOcxArgv } from "../../src/link/ssh-argv";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { spawnTestChild } from "../helpers/spawn-test-child";
@@ -260,4 +260,11 @@ test("the shared fixture decoder reads back exactly the arguments the Windows bu
   expect(windowsScriptData(script(windowsOcxArgv(args)))).toEqual({ args });
   expect(windowsScriptData(script(windowsNativeArgv("C:\\fixture\\ocx.exe", args)))).toEqual({ executable: "C:\\fixture\\ocx.exe", args });
   expect(windowsScriptData(script(windowsChildHttpArgv(10100, "healthz", 100)))).toBeUndefined();
+});
+
+test("the Windows command carries the containment helper source intact", () => {
+  const script = Buffer.from(windowsOcxArgv(["--version"])[5]!, "base64").toString("utf16le");
+  expect(windowsScriptHelperSource(script)).toBe(OCX_JOB_SOURCE);
+  expect(OCX_JOB_SOURCE).toContain("0x2000D");
+  expect(OCX_JOB_SOURCE).not.toContain("ResumeThread");
 });
