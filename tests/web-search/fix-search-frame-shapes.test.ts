@@ -119,4 +119,15 @@ describe("search SSE field shapes", () => {
     const result = await parseSidecarSSE(response([{ type: "response.failed", response: { error: { message: { raw: true } } } }]));
     expect(result.error).toBe("sidecar stream ended with response.failed");
   });
+  test.each(["response.failed", "response.incomplete", "error"])("uses a fallback for empty or blank %s messages", async type => {
+    for (const message of ["", " \t\n"]) {
+      for (const error of [{ response: { error: { message } } }, { error: { message } }, { message }]) {
+        const result = await parseSidecarSSE(response([
+          { type: "response.output_text.delta", delta: "partial" },
+          { type, ...error },
+        ]));
+        expect(result).toEqual({ text: "partial", sources: [], error: `sidecar stream ended with ${type}` });
+      }
+    }
+  });
 });

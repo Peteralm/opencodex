@@ -441,7 +441,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
       const msg = resp?.error?.message
         ?? (data.error as { message?: string } | undefined)?.message
         ?? (typeof data.message === "string" ? data.message : undefined);
-      acc.error = typeof msg === "string" ? msg : `sidecar stream ended with ${type}`;
+      acc.error = typeof msg === "string" && msg.trim() ? msg : `sidecar stream ended with ${type}`;
     } else if (type?.includes("reasoning") && typeof data.delta === "string") {
       // Reasoning is not returned, but it is still decoded payload retained transiently by JSON.parse.
       acceptDecodedChars(data.delta.length);
