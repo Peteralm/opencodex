@@ -746,28 +746,46 @@ describe("bearer admission is not reused as a Cursor upstream credential", () =>
       { authorization: `Bearer ${fakeChatGptJwt({ "https://api.openai.com/auth": {} })}` },
       { authorization: `Bearer ${fakeChatGptJwt({ "https://api.openai.com/auth": { user_id: "u_1" } })}` },
     ];
-    for (const extra of cases) {
-      await withCursorCaptureServer(async (baseUrl, capturedAuth) => {
-        saveConfig(cursorForwardConfig(baseUrl));
-        writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens: {} }));
-        const server = await startOwnedServer();
-        try {
+    await withCursorCaptureServer(async (baseUrl, capturedAuth) => {
+      saveConfig(cursorForwardConfig(baseUrl));
+      writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens: {} }));
+      const server = startServer(0, { inspectNativeCodexOwnership });
+      try {
+        await waitForNativeMainStartupGate();
+        const send = (extra: Record<string, string>) => {
           const headers = { "x-opencodex-api-key": ADMISSION_SECRET, ...extra };
-          const response = surface === "Chat"
-            ? await postChatCompletions(server.url, "cursorcustom/auto", headers)
-            : await postResponses(server.url, "cursorcustom/auto", headers);
+          return surface === "Chat"
+            ? postChatCompletions(server.url, "cursorcustom/auto", headers)
+            : postResponses(server.url, "cursorcustom/auto", headers);
+        };
+        const beforeBearer = `Bearer ${fakeChatGptJwt({ organizations: [{ id: "org-before" }] })}`;
+        const afterBearer = `Bearer ${fakeChatGptJwt({ organizations: [{ id: "org-after" }] })}`;
+        // Real forwarding on both sides prevents a failed or cooled-down shared server from
+        // making the refusals pass. The capture server proves transport, not completion.
+        const before = await send({ authorization: beforeBearer });
+        const beforeBody = await before.text();
+        expect(capturedAuth, `before control (${before.status}): ${beforeBody}`).toEqual([beforeBearer]);
+        for (const extra of cases) {
+          const capturedBefore = capturedAuth.length;
+          const response = await send(extra);
+          const body = await response.json();
+          expect(capturedAuth.slice(capturedBefore)).toEqual([]);
           if (surface === "Responses") {
-            expect(await response.json()).toMatchObject({ status: "failed" });
+            expect(body).toMatchObject({ status: "failed" });
           } else {
             expect(response.status).not.toBe(200);
-            await response.text();
           }
-          expect(capturedAuth).toEqual([]);
-        } finally {
-          await server.stop(true);
+          expect(body).toMatchObject({
+            error: { message: expect.stringContaining("no Cursor access token is configured") },
+          });
         }
-      });
-    }
+        const after = await send({ authorization: afterBearer });
+        const afterBody = await after.text();
+        expect(capturedAuth, `after control (${after.status}): ${afterBody}`).toEqual([beforeBearer, afterBearer]);
+      } finally {
+        await server.stop(true);
+      }
+    });
   });
 
   test.each(["Responses", "Chat"])("%s keeps an unmarked JWT as the Cursor credential", async surface => {
