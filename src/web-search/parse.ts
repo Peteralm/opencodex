@@ -46,12 +46,20 @@ const UNINDEXED_PART = "unindexed";
 
 /**
  * Key a streamed text event by its content part. An event without valid indexes joins the only
- * indexed part when exactly one exists, and otherwise shares the separate unindexed part.
+ * indexed part when exactly one exists. The first indexed event identifies any preceding
+ * unindexed accumulator; once multiple indexed parts exist, unindexed text stays separate.
  */
 function streamedPartKey(data: Record<string, unknown>, parts: Map<string, StreamedPart>): string {
   const output = data.output_index;
   const content = data.content_index;
-  if (Number.isInteger(output) && Number.isInteger(content)) return `${output}:${content}`;
+  if (Number.isInteger(output) && Number.isInteger(content)) {
+    const key = `${output}:${content}`;
+    if (parts.size === 1 && parts.has(UNINDEXED_PART)) {
+      parts.set(key, parts.get(UNINDEXED_PART)!);
+      parts.delete(UNINDEXED_PART);
+    }
+    return key;
+  }
   const indexed = [...parts.keys()].filter(key => key !== UNINDEXED_PART);
   return indexed.length === 1 ? indexed[0]! : UNINDEXED_PART;
 }

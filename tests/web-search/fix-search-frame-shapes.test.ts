@@ -55,6 +55,34 @@ describe("search SSE field shapes", () => {
     ]));
     expect(result).toEqual({ text: "Hello", sources: [] });
   });
+  test("matches an indexed done event to preceding unindexed deltas", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", delta: "Hello" },
+      { type: "response.output_text.done", output_index: 0, content_index: 0, text: "Hello" },
+      { type: "response.completed" },
+    ]));
+    expect(result).toEqual({ text: "Hello", sources: [] });
+  });
+  test("keeps distinct indexed parts after identifying an unindexed part", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", delta: "draft" },
+      { type: "response.output_text.done", output_index: 1, content_index: 0, text: "Second. " },
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "First. " },
+      { type: "response.output_text.done", output_index: 0, content_index: 1, text: "Middle. " },
+      { type: "response.completed" },
+    ]));
+    expect(result).toEqual({ text: "First. Middle. Second. ", sources: [] });
+  });
+  test("keeps ambiguous unindexed text separate when multiple indexed parts exist", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "First. " },
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "Second. " },
+      { type: "response.output_text.delta", delta: "Unindexed." },
+      { type: "response.output_text.done", output_index: 2, content_index: 0, text: "Third. " },
+      { type: "response.completed" },
+    ]));
+    expect(result).toEqual({ text: "First. Second. Third. Unindexed.", sources: [] });
+  });
   test("assembles indexed parts in index order rather than arrival order", async () => {
     const result = await parseSidecarSSE(response([
       { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "Second." },
