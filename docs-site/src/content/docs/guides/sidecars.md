@@ -284,4 +284,4 @@ intended account and workload.
 
 See the [Configuration reference](/reference/configuration/server/#sidecars) for every field.
 
-Long search queries and answers are shortened at complete Unicode character boundaries, so emoji are not split by the result limits.
+Long search queries and answers are shortened without splitting a UTF-16 surrogate pair, so a single character such as 😀 is never cut in half by the result limits. A sequence of several characters, such as emoji joined with a zero-width joiner, can still be cut between its parts.

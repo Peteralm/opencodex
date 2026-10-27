@@ -18,4 +18,10 @@ describe("single search result Unicode boundaries", () => {
     expect(data.answer).toBe(text);
     expect(data.query).toEndWith("😀");
   });
+  test("keeps a pair that ends exactly at the limit when truncation occurs", () => {
+    const result = formatWebSearchResult("q".repeat(198) + "😀tail", { text: "a".repeat(3998) + "😀tail", sources: [] }, true);
+    const data = JSON.parse(result.split("\n")[1]!);
+    expect(data.answer).toBe("a".repeat(3998) + "😀\n…[truncated]");
+    expect(data.query).toBe("q".repeat(198) + "😀…");
+  });
 });

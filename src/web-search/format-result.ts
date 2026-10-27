@@ -10,6 +10,7 @@ const MAX_TOTAL_CHARS = 8000;
 /** Bound for a batched error status so every query's status line stays small. */
 const MAX_BATCH_ERROR_CHARS = 300;
 
+/** Truncate to at most `max` UTF-16 units without splitting a surrogate pair, then mark the cut. */
 function clamp(s: string, max: number): string {
   return s.length <= max ? s : `${safePrefix(s, max)}\n…[truncated]`;
 }
