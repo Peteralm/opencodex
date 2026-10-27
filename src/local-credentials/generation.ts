@@ -95,31 +95,25 @@ export function generationToken(state: CredentialGeneration): string {
   return `lc1:${state.epoch}:${state.sequence}`;
 }
 /**
- * Inside the publication fence: record a ticket before credential bytes change, so a writer that
- * dies mid-publication keeps withholding attestation. Status cannot read while the fence is held,
- * so a file publication without metadata to update needs no ticket; a keychain write must record
- * its account first and fails if it cannot.
+ * Inside the publication fence, before any credential bytes change: persist a ticket that advances
+ * the generation. Once coordination metadata exists every publication needs one, because a write
+ * whose ticket was lost could end where it began (add then remove) and leave an earlier token
+ * attestable; so any failure here, including unreadable or unwritable metadata, aborts the
+ * publication before it writes. Without metadata no observer has ever attested, so a file write
+ * needs no ticket; a keychain write still creates the metadata to record its account first.
  */
 function begin(home: string, accounts: readonly string[]): Ticket | null {
-  const required = accounts.length > 0;
-  try {
-    return (() => {
-      if (!required && !exists(pathFor(home))) return null;
-      const state = loadForWrite(home);
-      if (state.pending.length >= 1024) throw new Error("Too many pending credential publications");
-      if (accounts.some(a => !a || a.length > 1024)) throw new Error("Invalid private key account");
-      const ticket = { id: randomUUID(), pid: process.pid };
-      state.pending.push(ticket);
-      state.keyAccounts = [...new Set([...state.keyAccounts, ...accounts])];
-      if (state.keyAccounts.length > 8192) throw new Error("Too many private key accounts");
-      advance(state);
-      save(home, state);
-      return ticket;
-    })();
-  } catch (error) {
-    if (required) throw error;
-    return null;
-  }
+  if (accounts.length === 0 && !exists(pathFor(home))) return null;
+  const state = loadForWrite(home);
+  if (state.pending.length >= 1024) throw new Error("Too many pending credential publications");
+  if (accounts.some(a => !a || a.length > 1024)) throw new Error("Invalid private key account");
+  const ticket = { id: randomUUID(), pid: process.pid };
+  state.pending.push(ticket);
+  state.keyAccounts = [...new Set([...state.keyAccounts, ...accounts])];
+  if (state.keyAccounts.length > 8192) throw new Error("Too many private key accounts");
+  advance(state);
+  save(home, state);
+  return ticket;
 }
 
 /** Inside the fence. Never throws: a ticket that cannot be closed keeps withholding attestation. */

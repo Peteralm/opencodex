@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { unlinkSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { withLocalCredentialFixture } from "../helpers/local-credentials";
 
 const accountStoreUrl = new URL("../../src/codex/account-store.ts", import.meta.url).href;
@@ -208,3 +208,25 @@ for (const reference of ["keychain:openai", "gcp-sa:openai/fixture-sa"] as const
     });
   }
 }
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a publication whose ticket cannot be persisted aborts before it changes any credential bytes", async () => {
+  await withLocalCredentialFixture(async f => {
+    // Leave coordination metadata behind without a live watcher, then make it unreplaceable.
+    f.start().stop();
+    const metadata = join(f.home, "local-credentials.json");
+    const before = readFileSync(metadata);
+    const auth = join(f.codex, "auth.json");
+    let wrote = false;
+    chmodSync(f.home, 0o500);
+    try {
+      expect(() => f.publication.publishCredentialSync(() => {
+        wrote = true;
+        f.put(auth, { OPENAI_API_KEY: "fixture-transient" });
+        unlinkSync(auth);
+      })).toThrow();
+    } finally { chmodSync(f.home, 0o700); }
+    expect(wrote).toBe(false);
+    expect(existsSync(auth)).toBe(false);
+    expect(readFileSync(metadata).equals(before)).toBe(true);
+  });
+});
