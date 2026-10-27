@@ -1,5 +1,7 @@
 {
   "fix-search-frame-shapes.test.ts": "web-search",
+  "fix-search-orphan-source.test.ts": "web-search",
+
   "cursor-native-grep-globs.test.ts": "providers/cursor",
   "tool-identity-hash.test.ts": "adapters",
   "eventstream-fragmentation.test.ts": "responses",

@@ -285,3 +285,5 @@ intended account and workload.
 See the [Configuration reference](/reference/configuration/server/#sidecars) for every field.
 
 Search responses with malformed optional fields retain valid answer text and citations. Invalid error-message values use a generic failure message.
+
+When a search answer ends with a Sources list, a list item without a URL stays in the answer instead of being removed as a citation. Text in inline code, such as `mode:fast`, is not mistaken for a link.
