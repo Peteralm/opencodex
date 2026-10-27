@@ -80,8 +80,11 @@ function harness(remotePlatform: "posix" | "windows" = "posix") {
     async run(argv, options) {
       const command = argv.at(-1) ?? "";
       const decoded = command.startsWith("powershell.exe ") ? Buffer.from(command.split(" ").at(-1)!, "base64").toString("utf16le") : command;
-      const payload = /\$arguments = @\(.*FromBase64String\('([^']+)'\)/.exec(decoded)?.[1];
-      const nativeArgs: string[] | undefined = payload ? JSON.parse(Buffer.from(payload, "base64").toString("utf8")) : undefined;
+      // remote-windows.ts carries the arguments as `$d=Read-Data '<base64 of {"args":[...]}>'`.
+      const payload = /\$d=Read-Data '([^']+)'/.exec(decoded)?.[1];
+      const nativeArgs: string[] | undefined = payload
+        ? (JSON.parse(Buffer.from(payload, "base64").toString("utf8")) as { args: string[] }).args
+        : undefined;
       const step: Step = argv[0] === "ssh-keygen" ? "fingerprint"
         : command === "echo ocx-link-probe" ? "probe"
         : command === WINDOWS_OS_PROBE ? "windows"
