@@ -72,6 +72,15 @@ describe("search SSE field shapes", () => {
     ]));
     expect(result).toEqual({ text: "First. Second.", sources: [] });
   });
+  test("fills an output_text block whose text is not a string from the indexed stream", async () => {
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", output_index: 0, content_index: 1, delta: "Second." },
+      { type: "response.completed", response: { output: [
+        { type: "message", content: [{ type: "output_text", text: "First. " }, { type: "output_text", text: 42 }] },
+      ] } },
+    ]));
+    expect(result).toEqual({ text: "First. Second.", sources: [] });
+  });
   test("keeps the completed text when malformed entries leave no streamed text", async () => {
     const result = await parseSidecarSSE(response([{ type: "response.completed", response: { output: [
       { type: "message", content: "not-an-array" }, { type: "message", content: [{ type: "output_text", text: "kept" }] },

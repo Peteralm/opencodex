@@ -253,7 +253,8 @@ function fromOutputArray(output: OutputItem[], seen: Set<string>): CompletedOutp
     if (!Array.isArray(item.content)) { incomplete = true; continue; }
     for (const [contentIndex, block] of item.content.entries()) {
       if (!block || typeof block !== "object") { incomplete = true; continue; }
-      if (block.type === "output_text" && typeof block.text === "string") {
+      if (block.type === "output_text") {
+        if (typeof block.text !== "string") { incomplete = true; continue; }
         text += block.text;
         parts.set(`${outputIndex}:${contentIndex}`, block.text);
         for (const ann of Array.isArray(block.annotations) ? block.annotations : []) collectAnnotation(ann, sources, seen);
