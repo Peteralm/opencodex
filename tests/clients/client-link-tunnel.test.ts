@@ -1370,3 +1370,22 @@ test("a reconnect with the same link and listener ids names a new connection gen
     await h.close();
   }
 });
+
+test("a supervisor rebuilt by a restart rollback in the same process never repeats a connection generation", async () => {
+  // startClientRuntime's serve() builds a fresh supervisor when a failed restart rolls back.
+  const seen: string[] = [];
+  for (let round = 0; round < 2; round += 1) {
+    const h = supervisorHarness();
+    try {
+      await h.start();
+      await h.step();
+      expect(h.state()).toBe("connected");
+      seen.push(h.supervisor.connectionGeneration()!);
+    } finally {
+      await h.close();
+    }
+  }
+  expect(seen[0]).toEqual(expect.any(String));
+  expect(seen[1]).toEqual(expect.any(String));
+  expect(seen[1]).not.toBe(seen[0]);
+});

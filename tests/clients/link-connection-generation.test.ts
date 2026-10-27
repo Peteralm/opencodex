@@ -66,7 +66,10 @@ test("a connection generation whose proof does not bind it to this nonce and key
   } finally { home.stop(true); }
 });
 
-test("a Home tunnel restarted for the same link and listener announces a new generation and a steady one keeps it", async () => {
+const HOME_LINK = "lnk_0123456789abcdef";
+
+/** A Home supervisor over scripted ssh children; the first tick spawns the link's tunnel. */
+function homeSupervisor() {
   const children: Array<{ resolve: (code: number) => void }> = [];
   const runner: SshRunner = {
     async run() { return { code: 0, stdout: "", stderr: "" }; },
@@ -77,36 +80,55 @@ test("a Home tunnel restarted for the same link and listener announces a new gen
       return { pid: 500 + children.length, argv: [...argv], exited, stderr: Promise.resolve(""), kill: () => resolve(143) } satisfies SshChild;
     },
   };
-  const id = "lnk_0123456789abcdef";
   const timers: Array<() => void> = [];
   const supervisor = createLinkSupervisor({
-    readStore: () => ({ version: 1, listenerPort: 19001, links: [{ id, alias: "child.example", direction: "hub-initiated",
+    readStore: () => ({ version: 1, listenerPort: 19001, links: [{ id: HOME_LINK, alias: "child.example", direction: "hub-initiated",
       hostKeyFingerprint: "SHA256:abcdefghijklmnop", tunnelPort: 19002, apiKeyId: "fixture-key", createdAt: "2026-10-27T00:00:00.000Z" }] }),
     runner, now: () => 5_000, readPidfile: () => null, writePidfile: () => {}, removePidfile: () => {},
     setTimer: callback => { timers.push(callback); return 1 as unknown as ReturnType<typeof setInterval>; }, clearTimer: () => {},
   });
+  return {
+    supervisor, children,
+    async start() { supervisor.start(); timers[0]?.(); await Promise.resolve(); },
+  };
+}
+
+test("a Home tunnel restarted for the same link and listener announces a new generation and a steady one keeps it", async () => {
+  const { supervisor, children, start } = homeSupervisor();
   try {
-    expect(supervisor.connectionGeneration?.(id)).toBeUndefined();
-    supervisor.start();
-    timers[0]?.();
-    await Promise.resolve();
+    expect(supervisor.connectionGeneration?.(HOME_LINK)).toBeUndefined();
+    await start();
     expect(children).toHaveLength(1);
-    const first = supervisor.connectionGeneration?.(id);
+    const first = supervisor.connectionGeneration?.(HOME_LINK);
     expect(first).toEqual(expect.any(String));
-    expect(supervisor.connectionGeneration?.(id)).toBe(first);
-    expect(await supervisor.reconnect(id)).toBe(true);
+    expect(supervisor.connectionGeneration?.(HOME_LINK)).toBe(first);
+    expect(await supervisor.reconnect(HOME_LINK)).toBe(true);
     expect(children).toHaveLength(2);
-    const second = supervisor.connectionGeneration?.(id);
+    const second = supervisor.connectionGeneration?.(HOME_LINK);
     expect(second).toEqual(expect.any(String));
     expect(second).not.toBe(first);
     expect(supervisor.connectionGeneration?.("lnk_fedcba9876543210")).toBeUndefined();
   } finally { await supervisor.stop(); }
 });
 
+test("a Home supervisor rebuilt in the same process never repeats a connection generation", async () => {
+  const seen: string[] = [];
+  for (let round = 0; round < 2; round += 1) {
+    const home = homeSupervisor();
+    try {
+      await home.start();
+      expect(home.children).toHaveLength(1);
+      seen.push(home.supervisor.connectionGeneration!(HOME_LINK)!);
+    } finally { await home.supervisor.stop(); }
+  }
+  expect(seen[0]).toEqual(expect.any(String));
+  expect(seen[1]).not.toBe(seen[0]);
+});
+
 test("a runtime restart changes every connection generation", () => {
   const relayAuth = new URL("../../src/link/relay-auth.ts", import.meta.url).href;
   const read = () => {
-    const result = spawnSync(process.execPath, ["-e", `const m = await import(${JSON.stringify(relayAuth)}); console.log(m.linkConnectionGeneration(1));`], { encoding: "utf8" });
+    const result = spawnSync(process.execPath, ["-e", `const m = await import(${JSON.stringify(relayAuth)}); console.log(m.nextLinkConnectionGeneration());`], { encoding: "utf8" });
     expect(result.status).toBe(0);
     return result.stdout.trim();
   };

@@ -26,7 +26,7 @@ import type { LinkDiagnosticSink } from "../link/diagnostics";
 import { isLinkConnection, readClientConnectionState } from "./state";
 import { clientLinkStatePath, readClientLinkState, type ClientLinkState } from "./link-state";
 import type { LinkTunnelGate, LinkAdmissionResult } from "./link-relay";
-import { linkConnectionGeneration } from "../link/relay-auth";
+import { nextLinkConnectionGeneration } from "../link/relay-auth";
 
 /**
  * The client-owned `ssh -N -L 127.0.0.1:<tunnelPort>:127.0.0.1:<peerListenerPort> <alias>`
@@ -604,8 +604,8 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
   let adoptedRecord: ClientTunnelPidfile | null = null;
   let tunnelPort: number | null = null;
   let ownerGeneration = 0;
-  /** Transitions into connected; with the process instance it names the current connection. */
-  let connections = 0;
+  /** Minted on every transition into connected from the process-wide sequence (relay-auth.ts). */
+  let connection: string | undefined;
   let state: TunnelState = IDLE;
   let linkId: string | null = null;
   let failure: ClientLinkSupervisorStatus | undefined;
@@ -690,7 +690,7 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
   };
 
   const setState = (next: TunnelState): void => {
-    if (next.kind === "connected" && state.kind !== "connected") connections += 1;
+    if (next.kind === "connected" && state.kind !== "connected") connection = nextLinkConnectionGeneration();
     state = next;
     settleWaiters();
   };
@@ -992,7 +992,7 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
     },
     connectionGeneration(): string | undefined {
       if (!started || stopping || failure !== undefined || state.kind !== "connected") return undefined;
-      return linkConnectionGeneration(connections);
+      return connection;
     },
     status(): ClientLinkSupervisorStatus {
       if (failure) return failure;

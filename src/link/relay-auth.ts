@@ -30,6 +30,18 @@ export function linkConnectionGeneration(counter: number): string {
   return `${LINK_RUNTIME_INSTANCE}:${counter}`;
 }
 
+let connectionSequence = 0;
+
+/**
+ * A fresh connection name from one process-wide sequence, shared by the Home and Child
+ * supervisors. A supervisor rebuilt in the same process (a restart rollback, a listener restart)
+ * therefore never repeats a name an earlier one handed out.
+ */
+export function nextLinkConnectionGeneration(): string {
+  connectionSequence += 1;
+  return linkConnectionGeneration(connectionSequence);
+}
+
 export function linkConnectionProof(fingerprint: string, keyId: string, linkId: string, nonce: string, generation: string): string | null {
   if (!isLinkConnectionGeneration(generation) || !linkRelayProof(fingerprint, "listener", keyId, linkId, nonce)) return null;
   return createHmac("sha256", Buffer.from(fingerprint, "hex"))
