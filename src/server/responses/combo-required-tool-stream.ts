@@ -3,7 +3,9 @@ import { createSseInspector, type SseInspectorHandlers } from "../relay";
 import { inspectResponseLogSsePayloadParsed } from "../request-log";
 import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "../sse-payload-rewrite";
 import { isAuthorizedProviderExecutedCall, type ProviderExecutedCallType } from "../responses-undeclared-tool-guard";
-import { requiredToolContractOf, type RequiredToolContract } from "./combo-required-tool-contract";
+import { requiredToolContractOf } from "./combo-required-tool-contract";
+import { requiredToolFulfillments } from "./combo-required-tool-fulfillments";
+import type { AdapterRequest } from "../../adapters/base";
 
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | undefined {
@@ -15,8 +17,6 @@ const reasoningEvents = new Set([
   "response.reasoning_text.delta", "response.reasoning_text.done",
 ]);
 const controlEvents = new Set(["response.created", "response.in_progress", "response.queued", "response.heartbeat"]);
-// Codex's reserved functions group denotes the same identity as a bare tool.
-const toolNamespace = (item: { namespace?: unknown }) => item.namespace === "functions" ? undefined : item.namespace;
 
 /** Only known reasoning frames may extend a mandatory-tool prelude; other traffic commits. */
 export function requiredToolReasoningPrelude(payload: unknown): boolean {
@@ -27,7 +27,7 @@ export function requiredToolReasoningPrelude(payload: unknown): boolean {
 }
 
 /** In-place projection is shared by the existing inspection and client rewrite owners. */
-function terminalGuard(requirement: RequiredToolContract & { namespace?: unknown }, ownership: ReadonlySet<ProviderExecutedCallType>, evidence: { replayUnsafe: boolean }, normalizeItem: (item: unknown) => unknown) {
+function terminalGuard(fulfills: (item: RecordValue, clientCall: boolean) => boolean, ownership: ReadonlySet<ProviderExecutedCallType>, evidence: { replayUnsafe: boolean }, normalizeItem: (item: unknown) => unknown) {
   let fulfilled = false;
   const observe = (value: unknown, complete: boolean) => {
     const item = record(normalizeItem(value));
@@ -37,9 +37,7 @@ function terminalGuard(requirement: RequiredToolContract & { namespace?: unknown
     const hostedCall = typeof item.type === "string" && item.type.endsWith("_call") && !clientCall;
     if (providerExecuted || hostedCall) evidence.replayUnsafe = true;
     if (complete && item.status !== "in_progress" && item.status !== "incomplete" && item.status !== "failed") {
-      fulfilled ||= clientCall && (requirement.kind === "any" || typeof item.name !== "string"
-        || item.name === requirement.name && toolNamespace(item) === toolNamespace(requirement))
-        || requirement.kind === "any" && requirement.hostedCallTypes.has(String(item.type));
+      fulfilled ||= fulfills(item, clientCall);
     }
     if (!clientCall && !hostedCall && item.type !== "message" && item.type !== "reasoning") evidence.replayUnsafe = true;
   };
@@ -75,23 +73,18 @@ function terminalGuard(requirement: RequiredToolContract & { namespace?: unknown
 export function createComboRequiredToolStreamGuard(
   rawBody: unknown, ownership: ReadonlySet<ProviderExecutedCallType>, evidence = { replayUnsafe: false },
   normalizeItem: (item: unknown) => unknown = item => item,
+  request?: AdapterRequest,
 ) {
   const contract = requiredToolContractOf(rawBody);
   if (!contract) return undefined;
-  // Selectors and observations must resolve through the very same authorized restoration.
-  const choice = record(record(rawBody)?.tool_choice);
-  const selected = contract.kind === "named" ? record(normalizeItem({ ...choice,
-    type: choice?.type === "custom" ? "custom_tool_call" : "function_call",
-  })) : undefined;
-  const requirement = contract.kind === "named" && typeof selected?.name === "string"
-    ? { ...contract, name: selected.name, namespace: selected.namespace } : contract;
-  const clientGuard = terminalGuard(requirement, ownership, evidence, normalizeItem);
+  const fulfills = requiredToolFulfillments(rawBody, contract, normalizeItem, request);
+  const clientGuard = terminalGuard(fulfills, ownership, evidence, normalizeItem);
   return {
     rememberCompleted(response: RecordValue, remember: (response: RecordValue) => void) {
       if (!clientGuard.project({ type: "response.completed", response })) remember(response);
     },
     inspectorFactory(handlers: SseInspectorHandlers) {
-      const guard = terminalGuard(requirement, ownership, evidence, normalizeItem);
+      const guard = terminalGuard(fulfills, ownership, evidence, normalizeItem);
       return createSseInspector({
         ...handlers,
         onOpaquePayload(payload) { if (payload !== "[DONE]") guard.opaque(); handlers.onOpaquePayload?.(payload); },

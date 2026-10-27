@@ -28,9 +28,16 @@ formatting without overriding cyber-policy precedence. Regression coverage lives
 
 For native `openai-responses` combo children requested with `stream: true`,
 `src/server/responses/combo-required-tool-stream.ts` applies the same explicit required/named
-contract against the adapter's final outbound body. Authorized hosted-image substitutions replace
-the client declaration and selector before judgment: `required` accepts the declared
-`image_generation_call`, while hosted non-function selectors retain their terminal owner.
+contract derived from the caller body, independently of outbound capability filtering. Acceptable
+calls retain caller-declared identities through the shared restorers. The adapter records authorized
+hosted substitutions in `AdapterRequest.hostedToolSubstitutions` during the build step that applies
+them; delivery reads that metadata and body from the request that produced the stream, including
+in-place queued revalidation in `src/server/responses/request-transport.ts`. Every build supplies an
+array, including empty, so removing a preference cannot retain an earlier build's authority.
+`src/server/responses/combo-required-tool-fulfillments.ts` accepts `image_generation_call` for the
+replaced image function only when that send still declares the hosted capability. A filtered tool or
+lowered `none` selector never erases caller intent: missing calls retain the usual pre-commit fallback
+or post-commit typed failure. Caller hosted non-function selectors retain their terminal owner.
 Completed item events and terminal snapshots can satisfy it; a call start alone cannot.
 Missing calls turn `response.completed` into `response.failed` with
 `required_tool_contract_unsatisfied`, retaining response identity, output and usage.
@@ -55,7 +62,8 @@ with output commit conservatively; only a checked missing-call terminal with har
 may be discarded. Cancellation wakes a pending read; every exit clears the hold timer and checks cancellation before parent success.
 Auto/none, unknown contracts, direct native routes, Chat and runTurn keep their terminal owners.
 Coverage: `tests/server/server-combo-stream-required-tool.test.ts`,
-`tests/server/server-combo-stream-hosted-tool-contract.test.ts` (hosted substitutions, eager/tee), and
+`tests/server/server-combo-stream-hosted-tool-contract.test.ts` (hosted substitutions, eager/tee),
+`tests/server/server-combo-stream-send-contract.test.ts` (queued rebuilds and filtered required tools), and
 `tests/routing/combo-required-tool-stream-preflight.test.ts`.
 
 ## Combo streaming commit boundary

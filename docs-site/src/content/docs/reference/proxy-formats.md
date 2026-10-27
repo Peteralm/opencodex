@@ -36,7 +36,10 @@ Direct native routes remain separate. Translated Chat routes have their own guar
 ## Required tools on streaming native combo routes
 
 For `stream: true`, native Responses combo children also fail an unmet required or named tool
-choice with `required_tool_contract_unsatisfied`. A fully held text-only completion can advance to
+choice with `required_tool_contract_unsatisfied`. The caller's mandatory choice remains binding even
+when a target filters out its tool or lowers the outbound choice to `none`. Configured hosted-image
+substitutions can fulfill the original choice only when applied to the request actually sent,
+including after queued revalidation. A fully held text-only completion can advance to
 another eligible target. Known reasoning frames are held for at most one second from the first frame;
 later frames do not extend that deadline. Expiry releases the buffered stream and commits the target,
 preserving any pending upstream read. Text, tool events, unknown/opaque output and buffer limits also

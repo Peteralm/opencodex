@@ -65,7 +65,7 @@ import {
 } from "../responses-snapshot-repair";
 import { rewriteResponsesIncompleteReasonJson } from "../../responses/incomplete-reason";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
-import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson } from "../responses-image-gen-repair";
+import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson, restoreImageGenCalls } from "../responses-image-gen-repair";
 import {
   createSelfNamedToolCallNamespaceScrubRewrite,
   scrubSelfNamedToolCallNamespaceInJson,
@@ -830,6 +830,7 @@ export async function deliverPassthroughResponse(
       const maskCredential = createOutboundCredentialMask(nativeExchange.request.headers);
       const requiredStreamEvidence = { replayUnsafe: !!webSearchBridgePlan };
       const normalizeRequiredToolItem = (item: unknown) => {
+        item = restoreImageGenCalls(item, imageGenCallAliases).value;
         item = scrubSelfNamedToolCallNamespace(item, selfNamedNamespaceScrubAuthorization).value;
         item = restoreMuseToolNames(item, responseEffects.routedMuseToolNameAliases).value;
         item = restoreRoutedNamespaceCalls(item, responseEffects.routedNamespaceToolAliases).value;
@@ -839,8 +840,8 @@ export async function deliverPassthroughResponse(
       const requiredStreamGuard = options.comboAttempt && clientRequestedStream === true
         && (options.inboundWire === undefined || options.inboundWire === "responses")
         && route.provider.adapter === "openai-responses" && !isNonReplayableResponse(upstreamResponse)
-        ? createComboRequiredToolStreamGuard(nativeExchange.outboundRequestBody, providerExecutedCallTypes,
-          requiredStreamEvidence, normalizeRequiredToolItem)
+        ? createComboRequiredToolStreamGuard(parsed._rawBody, providerExecutedCallTypes,
+          requiredStreamEvidence, normalizeRequiredToolItem, nativeExchange.request)
         : undefined;
       // The factory creates independent raw/client state with one tool identity resolver.
       const requiredStreamInspector = requiredStreamGuard;
