@@ -7,6 +7,7 @@ import { captureOAuthAccountSelection, getAccountSet, saveCredential, setActiveA
 import { bindAnthropicSessionAffinity, clearAnthropicAccountPoolState, resolveAnthropicAccountForSession,
   promoteAnthropicActiveAccount, recordAnthropicAccount429, resetAnthropicRoutingForManualSelection } from "../../../src/oauth/anthropic-routing";
 import type { OcxConfig } from "../../../src/types";
+import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../../../src/providers/quota";
 
 const originalHome = process.env.OPENCODEX_HOME;
 let home: string;
@@ -24,6 +25,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ocx-affinity-restart-"));
   process.env.OPENCODEX_HOME = home;
   clearAnthropicAccountPoolState();
+  clearAccountQuotaCache();
 });
 afterEach(async () => {
   clock?.mockRestore(); clock = undefined;
@@ -82,4 +84,18 @@ test("shared-quota rejection rebinds even after a short Retry-After expires", as
   now += 20;
   await promoteAnthropicActiveAccount(b, captureOAuthAccountSelection("anthropic"), { config, sessionKey: session });
   expect(resolveAnthropicAccountForSession(session, config).accountId).toBe(b);
+});
+test.each(["shared five-hour", "model-specific"] as const)("measured %s exhaustion commits a replacement binding", async kind => {
+  const { a, b } = await seed();
+  const model = "claude-opus-5-5";
+  setCachedProviderAccountQuotaForTests("anthropic", a, kind === "shared five-hour"
+    ? { fiveHourPercent: 100 } : { customWindows: [{ label: "Opus", scope: "model", percent: 100 }] });
+  setCachedProviderAccountQuotaForTests("anthropic", b, { fiveHourPercent: 10 });
+  const selected = resolveAnthropicAccountForSession(session, config, Date.now(), null, model);
+  expect(selected.accountId).toBe(b);
+  expect(await promoteAnthropicActiveAccount(b, captureOAuthAccountSelection("anthropic"), {
+    config, sessionKey: session, model, reason: selected.reason,
+  })).not.toBeNull();
+  setCachedProviderAccountQuotaForTests("anthropic", a, { fiveHourPercent: 0 });
+  expect(resolveAnthropicAccountForSession(session, config, Date.now(), null, model)).toMatchObject({ accountId: b, reason: "affinity" });
 });

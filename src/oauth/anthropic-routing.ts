@@ -46,7 +46,7 @@ import { configuredAnthropicInstance, isAnthropicInstanceId, type AnthropicInsta
 import { resolveAnthropicAccountPoolConfig } from "./anthropic-pool-config";
 import { anthropicPoolKey } from "./pool-kernel";
 import type { GenerationContext } from "../lib/state-store-sweeper";
-import { AnthropicSessionAffinityStore, anthropicAffinityDigest, AFFINITY_IDLE_TTL_MS, MAX_AFFINITY_ENTRIES } from "./anthropic-session-affinity-store";
+import { AnthropicSessionAffinityStore, anthropicAffinityDigest, AFFINITY_IDLE_TTL_MS } from "./anthropic-session-affinity-store";
 
 /**
  * The read side of a `Headers` object, so a caller can pass the live upstream response's
@@ -875,16 +875,6 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     return pickLowestUsage(config, excludeId, now, decision, model, excludedAccountIds);
   }
 
-  function pruneExpiredAffinity(now: number): void {
-    for (const [key, entry] of sessionAffinity) {
-      if (now - entry.lastUsedAt > AFFINITY_IDLE_TTL_MS) sessionAffinity.delete(key);
-    }
-    if (sessionAffinity.size <= MAX_AFFINITY_ENTRIES) return;
-    const sorted = [...sessionAffinity.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
-    const drop = sessionAffinity.size - MAX_AFFINITY_ENTRIES;
-    for (let i = 0; i < drop; i++) sessionAffinity.delete(sorted[i]![0]);
-  }
-
   function stickyLimitForPool(config: OcxConfig): number {
     return normalizeAccountPoolStickyLimit(anthropicAccountPoolConfig(config).stickyLimit);
   }
@@ -971,7 +961,6 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     model?: string,
   ): AnthropicAccountSelection {
     if (!admitted(config)) return { accountId: null, reason: "none", routePosition: decision?.position };
-    pruneExpiredAffinity(now);
     const set = getAccountSet(PROVIDER);
     if (!set || set.accounts.length === 0) return { accountId: null, reason: "none", ...(decision ? { routePosition: decision.position } : {}) };
     const scoped = decision && !decision.fallback
@@ -1008,7 +997,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
 
     // A manual choice is a one-dispatch preference, not a lower-priority quota hint.
     // Consume it only after admission commits, so a failed token lookup cannot spend it.
-    if (manualPreference && !sessionAffinity.get(affinityKey(sessionKey))) {
+    if (manualPreference && !sessionAffinity.get(affinityKey(sessionKey), set, now)) {
       if (manualPreference.accountId !== set.activeAccountId || manualPreference.revision !== set.selectionRevision) {
         manualPreference = null;
       } else {
@@ -1023,13 +1012,13 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
 
     const key = affinityKey(sessionKey);
     if (key) {
-      const affined = sessionAffinity.get(key);
+      const affined = sessionAffinity.get(key, set, now);
       if (affined && now - affined.lastUsedAt <= AFFINITY_IDLE_TTL_MS) {
         const stillThere = set.accounts.some(a => a.id === affined.accountId && a.paused !== true && a.needsReauth !== true);
         const stillUsable = stillThere && !isCooled(affined.accountId, now)
           && isPoolCredentialUsable(affined.accountId, now);
         if (stillUsable && eligible.includes(affined.accountId) && (!model || !anthropicModelExhausted(affined.accountId, model))) {
-          sessionAffinity.set(key, { ...affined, lastUsedAt: now });
+          sessionAffinity.set(key, { ...affined, lastUsedAt: now }, set);
           return { accountId: affined.accountId, reason: "affinity", routePosition: decision?.position };
         }
         // A model route may exclude a healthy binding only for this request. Keep it for
@@ -1133,13 +1122,10 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     const key = affinityKey(sessionKey);
     if (!key || !normalizeAffinityComponent(accountId)) return;
     sessionAffinity.set(key, { accountId, lastUsedAt: now });
-    pruneExpiredAffinity(now);
   }
 
   function clearAnthropicSessionAffinityForAccount(accountId: string): void {
-    for (const [key, entry] of sessionAffinity) {
-      if (entry.accountId === accountId) sessionAffinity.delete(key);
-    }
+    sessionAffinity.invalidate(getAccountSet(PROVIDER), id => id !== accountId);
     // The roster just lost or changed a member. This is the account-removal path, so the next
     // activation question must re-read rather than answer from a count taken while the account
     // was still present -- otherwise a delete leaves a stale quorum for the length of the TTL.
@@ -1400,7 +1386,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   // Pause changes eligibility, not health. Do not reset cooldowns or cancel sent turns.
   function onPause(): void {
     quorumCache = null;
-    for (const [key] of sessionAffinity) sessionAffinity.get(key); // Persist invalidated pauses/reauthentication.
+    sessionAffinity.invalidate();
   }
   // A threshold write must fence in-flight automatic proposals, but it does not
   // revoke an operator's one-dispatch choice. Rebase only that still-owned choice;
@@ -1415,11 +1401,11 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   // Threshold mutations rebase it first, before this generic notification runs.
   function onSelection(event: Parameters<Parameters<typeof subscribeAccountSelections>[0]>[0]): void {
     if (event.provider !== PROVIDER || event.kind !== "oauth") return;
-    for (const [key] of sessionAffinity) sessionAffinity.get(key);
+    const snapshot = getAccountSet(PROVIDER);
+    sessionAffinity.invalidate(snapshot);
     if (!manualPreference) return;
-    const current = captureOAuthAccountSelection(PROVIDER);
-    if (current?.accountId !== manualPreference.accountId
-      || current.revision !== manualPreference.revision) manualPreference = null;
+    if (snapshot?.activeAccountId !== manualPreference.accountId
+      || snapshot.selectionRevision !== manualPreference.revision) manualPreference = null;
   }
 
 
@@ -1433,11 +1419,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
       upstreamHealth.delete(id);
       removed++;
     }
-    for (const [key, entry] of sessionAffinity) {
-      if (valid(entry.accountId)) continue;
-      sessionAffinity.delete(key);
-      removed++;
-    }
+    removed += sessionAffinity.invalidate(getAccountSet(PROVIDER), valid);
     if (manualPreference && !valid(manualPreference.accountId)) { manualPreference = null; removed++; }
     if (removed > 0) manualSelectionGeneration++;
     quorumCache = null;

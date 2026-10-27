@@ -480,9 +480,17 @@ removal/re-add, pause and reauthentication invalidate it. Invalid, oversized, fu
 the newest 2,000 entries survive, with a 24-hour idle lifetime. A restored binding precedes the startup active
 preference; an explicit runtime selection clears bindings and persists the reset.
 
-Temporary throttle and model-route/family detours retain a valid original binding even if the admission pause
-expires before commit, and refresh its idle timestamp. Shared-quota and entitlement refusal invalidation remains
-explicit. Structural writes use the config ACL settlement barrier and private atomic publisher; timestamp-only
+Temporary throttle and model-route/family detours retain a valid original binding and refresh its idle timestamp.
+Commit preserves a binding excluded by the route, an active admission pause or family rejection, or a transient
+pause recorded within `ANTHROPIC_DETOUR_GRACE_MS` (five minutes), even if that pause expired during preparation.
+Measured shared or model-specific exhaustion rebinds to the committed replacement; shared-quota and entitlement
+refusals explicitly invalidate bindings. Hydration and pause, selection, removal and reconciliation events validate
+rows against one auth snapshot, deriving each account's login fence once. Hot reads and writes validate only the
+touched row; ordinary publication does not reread auth or revalidate every binding. Structural writes use the config
+ACL settlement barrier and private no-follow atomic publisher; bounded hydration rejects final-entry symlinks,
+junctions and non-regular files with identifier-free warnings. Aliases above the config root remain supported.
+Memory and pending writes belong to the resolved config home; reset or an observed home change retires that scope.
+Timestamp-only
 updates coalesce for at most one second, with a best-effort shutdown flush. Failures emit identifier-free warnings
 and preserve the previous snapshot. `tests/adapters/anthropic/anthropic-affinity-restart.test.ts` and
 `tests/adapters/anthropic/anthropic-affinity-store.test.ts` exercise routing and persistence boundaries.

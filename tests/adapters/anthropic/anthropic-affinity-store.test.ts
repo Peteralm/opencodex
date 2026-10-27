@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, spyOn } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
@@ -9,6 +9,7 @@ import { AnthropicSessionAffinityStore, anthropicAffinityDigest, anthropicAffini
 import { atomicWriteFile } from "../../../src/config/atomic-write";
 import { runOptionalShutdownHooks } from "../../../src/lib/optional-shutdown-hooks";
 import { settleBackgroundWork } from "../../../src/lib/background-work";
+import * as authStore from "../../../src/oauth/store";
 
 const originalHome = process.env.OPENCODEX_HOME;
 let home: string;
@@ -18,7 +19,7 @@ const secret = "never-store-this-session-or-bearer";
 const key = anthropicAffinityDigest("anthropic", secret);
 const path = () => anthropicAffinityPath(home, "anthropic");
 const credential = () => ({ access: "fixture-only-bearer", refresh: "fixture-only-refresh", expires: Date.now() + 3_600_000, accountId: "fixture-account" });
-function owner(instance: "anthropic" | "anthropic-team" = "anthropic", write?: typeof atomicWriteFile) {
+function owner(instance: "anthropic" | "anthropic2" = "anthropic", write?: typeof atomicWriteFile) {
   const store = new AnthropicSessionAffinityStore(instance, write); stores.push(store); return store;
 }
 beforeEach(async () => {
@@ -66,7 +67,7 @@ test.each(["{bad json", JSON.stringify({ version: 2, entries: [] }), JSON.string
 });
 test("provider instance and config home are isolated", async () => {
   const { store } = await snapshot();
-  expect(owner("anthropic-team").get(key)).toBeUndefined();
+  expect(owner("anthropic2").get(key)).toBeUndefined();
   const other = mkdtempSync(join(tmpdir(), "ocx-affinity-other-"));
   try { process.env.OPENCODEX_HOME = other; expect(store.get(key)).toBeUndefined(); }
   finally { store.resetMemory(); process.env.OPENCODEX_HOME = home; removeTreeWithRetry(other); }
@@ -113,4 +114,70 @@ test("timestamp touches coalesce and shutdown flushes the latest use", async () 
   expect((await settleBackgroundWork({ timeoutMs: 5_000 })).settled).toBe(true);
   expect(writes).toBe(2);
   expect(JSON.parse(readFileSync(path(), "utf8")).entries[0].lastUsedAt).toBe(now);
+});
+
+test("2000 bindings use one auth snapshot per hydration, touch and invalidation", async () => {
+  const { store, data } = await snapshot();
+  data.entries = Array.from({ length: 2000 }, (_, i) => ({ ...data.entries[0],
+    sessionDigest: i.toString(16).padStart(64, "0") }));
+  writeFileSync(path(), JSON.stringify(data)); store.resetMemory();
+  const accounts = getAccountSet("anthropic");
+  const reads = spyOn(authStore, "getAccountSet").mockImplementation(() => accounts);
+  try {
+    expect(store.size).toBe(2000); expect(reads).toHaveBeenCalledTimes(1);
+    reads.mockClear();
+    const touched = "0".repeat(64);
+    store.set(touched, { accountId: id, lastUsedAt: Date.now() });
+    expect(reads).toHaveBeenCalledTimes(1);
+    reads.mockClear(); expect(store.get(touched)?.accountId).toBe(id);
+    expect(reads).toHaveBeenCalledTimes(1);
+    reads.mockClear(); await store.flush(); expect(reads).not.toHaveBeenCalled();
+    accounts!.accounts[0]!.paused = true;
+    reads.mockClear(); store.invalidate(accounts);
+    expect(reads).not.toHaveBeenCalled(); expect(store.size).toBe(0);
+    reads.mockClear(); store.invalidate(); expect(reads).toHaveBeenCalledTimes(1);
+  } finally { reads.mockRestore(); }
+});
+
+const linkProbe = mkdtempSync(join(tmpdir(), "ocx-affinity-link-probe-"));
+let linkUnavailable = false;
+try { symlinkSync(join(linkProbe, "absent"), join(linkProbe, "link"), "file"); }
+catch (error) {
+  if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+  linkUnavailable = true;
+  console.warn("[affinity test] skipping file symlinks: Windows EPERM (symlink privilege unavailable)");
+} finally { removeTreeWithRetry(linkProbe); }
+for (const dangling of [false, true]) test.skipIf(linkUnavailable)(`final ${dangling ? "dangling" : "external-target"} symlink is neither loaded nor followed on publication`, async () => {
+  const { store, data } = await snapshot(); store.resetMemory();
+  const external = mkdtempSync(join(tmpdir(), "ocx-affinity-external-"));
+  const target = join(external, "snapshot.json");
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    // Replace the fixture's own snapshot with a link to a target outside the config home.
+    const { unlinkSync } = await import("node:fs"); unlinkSync(path());
+    if (!dangling) writeFileSync(target, JSON.stringify(data));
+    symlinkSync(target, path(), "file");
+    expect(store.size).toBe(0); expect(warning).toHaveBeenCalled();
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(home);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(id);
+    store.set(key, { accountId: id, lastUsedAt: Date.now() }); await store.flush();
+    expect(lstatSync(path()).isSymbolicLink()).toBe(false);
+    if (dangling) expect(existsSync(target)).toBe(false);
+    else expect(readFileSync(target, "utf8")).toBe(JSON.stringify(data));
+  } finally { warning.mockRestore(); store.resetMemory(); removeTreeWithRetry(external); }
+});
+
+test("pending writes and shutdown cannot publish a previous home's rows", async () => {
+  const store = owner();
+  const other = mkdtempSync(join(tmpdir(), "ocx-affinity-switched-"));
+  try {
+    store.set(key, { accountId: id, lastUsedAt: Date.now() });
+    process.env.OPENCODEX_HOME = other;
+    await store.flush();
+    expect(existsSync(anthropicAffinityPath(other, "anthropic"))).toBe(false);
+    runOptionalShutdownHooks(); await settleBackgroundWork({ timeoutMs: 5_000 });
+    expect(existsSync(anthropicAffinityPath(other, "anthropic"))).toBe(false);
+    process.env.OPENCODEX_HOME = home;
+    expect(store.get(key)).toBeUndefined();
+  } finally { store.resetMemory(); process.env.OPENCODEX_HOME = home; removeTreeWithRetry(other); }
 });
