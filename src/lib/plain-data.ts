@@ -92,6 +92,7 @@ function copyArray(source: unknown[], seen: Set<object>): unknown {
   return copied;
 }
 
+/** Rebuild a value with tagged arrays and objects and key-sorted object entries for comparison. */
 function sorted(value: unknown): unknown {
   if (Array.isArray(value)) return ["array", value.map(sorted)];
   if (value !== null && typeof value === "object") {
