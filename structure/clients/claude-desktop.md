@@ -180,12 +180,12 @@ event loop. Injected probes may return a state or a promise, so isolated callers
 
 ### Picker mode: the Desktop egress proxy
 
-The shared CONNECT primitive accepts optional `allowedTargets` authorities. It snapshots and
-normalizes that list at startup; an empty list denies all, and other host/port pairs receive 403
+The shared CONNECT primitive snapshots and normalizes optional `allowedTargets` authorities at startup; an empty list denies all, and other host/port pairs receive 403
 before tunnel selection or dialing. Authentication and loopback refusal remain in force.
 Existing Claude consumers omit this option and retain blind forwarding; it enables no new integration or certificate trust.
 Windows trust removal in `src/claude/intercept/picker-trust-windows.ts` requires the exact picker common name and fingerprint before deleting a current-user Root entry. Public recovery certificates are verified as self-signed picker roots before removal; legacy roots may be removed without matching the current installation extension profile.
 Windows local-CA publication in `src/claude/intercept/local-ca-files.ts` hardens legacy inherited DACLs only after verifying the current owner and exclusively current-user, SYSTEM or Administrators grants; already private directories skip hardening. Newly created exclusive files and directories are hardened before strict owner/ACL verification and before CA access. ACL verification, including inherited SQLite sidecar ACLs, is memoized by bigint device/inode/birthtime within one publication; birthtime distinguishes recycled file IDs while preserving same-volume rename identity. Path and descriptor identity checks remain active on every access, and removed or replaced entries retire their memo.
+Native toggle, management/CLI apply, desired reconciliation, startup and picker writers follow the [config-directory hardening barrier](../config.md#opencodex-home-and-live-process-state). Cleanup gates each SQLite lease separately across OS untrust; profile and snapshot writes re-enter after trust/discovery. Admission expires within one ACL deadline without mutation or loss of retained-child ownership. `withFirstPartySecretsSettled` maps timeout to `ca_unavailable` with allowlisted `ca`/`ETIMEDOUT` diagnostics; CA startup never retries this as lease contention, and picker refusal releases its transition lock. Reconciliation and token-producing rollback leaves receive the barrier from their async caller; a CA refusal never wrote settings and needs no settings rollback. `tests/claude-integration/claude-intercept-acl-barrier.test.ts` gates parent flights and drives deadlines without sleeps. Diagnostics exclude raw exceptions, ACL output, PEMs and tokens.
 The authority primitive accepts `validityDays` from 1 through 3650 for short-lived callers; omitted values preserve the existing 3650-day CA lifetime. This parameter does not install trust or rotate an existing authority.
 
 Gateway remains the default Desktop mode. On macOS and Windows, picker intent defaults on only within the chosen first-party mode: either an explicit Desktop integration `false` or `claudeCode.intercept.picker: false` disables it. Default intent does not install certificate trust; startup and status only inspect trust, and explicit activation owns installation.
@@ -225,7 +225,7 @@ natively, counting name + value + 32 bytes per field and rejecting an oversized 
 The relay retains its 256-request aggregate ceiling across both HTTP versions and all sessions.
 Upload framing, not the method, determines whether input cleanup is needed: HTTP/2 headers
 without END_STREAM, or HTTP/1.1 transfer encoding or a positive Content-Length.
-Rejected unfinished uploads close after their empty reply's writable finishes; HTTP/2 uses the
+Before an upstream response, an accepted upload in `picker-listener.ts` expires after 60 seconds with no body progress. Actual body bytes reset this idle timer, and upstream backpressure pauses it. This idle guard adds neither an overall upload-duration limit nor an additional concurrency cap; existing runtime and protocol limits remain in effect. Body completion, the first upstream response, cancellation and shutdown clear the timer; SSE and long responses do not inherit it. `tests/claude-integration/claude-picker-upload.test.ts` covers silent upstreams, slot recovery, uploads longer than the idle interval and completed/early-response stream preservation. Rejected unfinished uploads close after their empty reply's writable finishes; HTTP/2 uses the
 underlying stream's finish event rather than the compatibility response's finish event, which
 waits for both stream halves to close. HTTP/1.1 refusals advertise `Connection: close` only while input is unfinished.
 Early replies stop relaying unfinished input only after the downstream writable finishes or the
@@ -235,8 +235,8 @@ After a complete response, HTTP/2 closes only that stream with `RST_STREAM NO_ER
 `CANCEL` for a premature downstream close or an upstream close without a reply.
 HTTP/1.1 refusals, generated 502s and early replies advertise `Connection: close` only while input is unfinished; after the writable finishes,
 the listener unpipes the upstream upload, reads and discards remaining input, and ends the socket
-gracefully so queued response bytes flush. Errors and premature downstream closes still destroy
-the request. The request-side drain adds no upload deadline or byte cap and does not wait for request-body
+gracefully so queued response bytes flush. Before a complete reply, cleanup aborts the HTTP/1.1 socket
+without a success response, or cancels only the HTTP/2 stream. The request-side drain adds no upload deadline or byte cap and does not wait for request-body
 completion before ending the response side. Bun 1.4.3's HTTP server ends a `Connection: close`
 response with `socket.destroySoon()` before the listener's own finish handler runs, which reset
 the splice before the reply reached the client; every HTTP/1.1 reply that closes unfinished input
@@ -565,7 +565,7 @@ The [compaction routing override](../transports/responses-failover.md#compaction
 
 ## Routed bundled-skill text
 
-Translated tool results in `src/claude/inbound.ts` retain nonempty string `tool_reference.tool_name` values as `Tool loaded: <name>` text lines in the paired `function_call_output`, preserving mixed-content order and the error marker. Each marker ends with a newline and starts with one after text that does not, because text-only tool output is joined without separators downstream. References describe client output; they do not declare or authorize executable tools, enable translated server-side deferral, or alter native passthrough. `tests/claude-integration/claude-inbound-tool-reference.test.ts` covers reference-only results, mixed/error output, malformed names, caller immutability and the real Responses parser.
+Translated tool results in `src/claude/inbound.ts` retain nonempty string `tool_reference.tool_name` values as `Tool loaded: <name>` text lines in the paired `function_call_output`, preserving mixed-content order and the error marker. Each marker ends with a newline and starts with one after text that does not, because text-only tool output is joined without separators downstream. References describe client output; they do not independently authorize executable tools, enable translated server-side deferral, or alter native passthrough. Opt-in [append-only discovery](../data-planes/claude-tool-loading.md) relocates only currently declared deferred definitions on selected Responses routes. `tests/claude-integration/claude-inbound-tool-reference.test.ts` covers reference-only results, mixed/error output, malformed names, caller immutability and the real Responses parser.
 
 `src/claude/inbound.ts` bounds the text-carrier skill-directory probe to 4,096 UTF-16 code units, plus one character to recognize the terminating newline. A longer first line is preserved intact instead of being scanned or stubbed; normal POSIX, Windows, mixed and UNC separators retain their basename matching. The existing 10,000-character payload threshold and `claudeCode.blockedSkills` policy remain: `claude-api` is blocked by default, and an explicit empty list disables elision. Native Anthropic passthrough and tool-call/result pairing are unchanged. `tests/claude-integration/claude-inbound.test.ts` covers the exact 4,096/4,097 boundary and a long newline-free carrier.
 
