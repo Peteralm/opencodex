@@ -182,6 +182,7 @@ describe("AI Stupid Level text-only contract for pinned models", () => {
     }
   }
 
+  // Cover both drain/retry sequences with reap headroom; a stuck ACL child must still time out.
   afterEach(async () => {
     clearModelCache();
     resetVisionDescriptionCache();
@@ -191,7 +192,7 @@ describe("AI Stupid Level text-only contract for pinned models", () => {
       home = "";
       codexHome = null;
     }
-  });
+  }, 3 * SERVER_BUDGET_MS);
 
   test.each(["home", "codex", "both"] as const)(
     "attempts both removals and restores the environment when %s cleanup fails",
