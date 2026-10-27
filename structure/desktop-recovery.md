@@ -9,16 +9,19 @@ not a new service owner, account credential or authority to stop another process
 
 ## Native lifetime and intent
 
-The shell registers its read-only IPv4 loopback listener after constructing the bootstrap
+The shell attempts to register its read-only IPv4 loopback listener after constructing the bootstrap
 window and before its first startup run. Its instance identifier is random for this process.
 The resolved configuration home comes only from the bundled CLI's normal resolve answer.
-Before resolution the producer reports unknown, never absence. The listener survives child
-exit and restart backoff. Each response reads the current exit coordinator: Stop, Quit and
+After successful `recovery::register`, the producer reports `unknown` before resolution, never absence.
+Registration failure installs no `Recovery` and grants no recovery authority. The listener survives
+child exit and restart backoff. Each response reads the current exit coordinator: Stop, Quit and
 update drain revoke recovery immediately, without waiting for a file update or heartbeat.
 
 The producer writes no discovery file. The consumer discovers the independently identified
 process's actual IPv4 loopback listening sockets through the OS; files cannot nominate a port,
-exhaust the probe budget or hide a genuine listener. The listener accepts two fresh nonce
+exhaust the probe budget or hide a genuine listener. The listener keeps the same listening socket
+after an accept error and waits 50 ms before retrying while active. Idle accept remains blocking;
+the delay applies only after an error. The listener accepts two fresh nonce
 challenges per connection, keeps the accepted socket
 open through inspection, bounds request/response size, uses a three-second connection deadline,
 and admits at most four simultaneous readers. It has no HTTP handler, credentials, mutations or
@@ -45,8 +48,9 @@ birth identity. The accepted connection's owner is checked before protocol traff
 process observations bracket fresh challenge responses. Linux
 checks the accepted connection's exact IPv4 tuple, established state and inode held in the native
 process's descriptor table. macOS uses the target process's established connection descriptor.
-A listening port alone is insufficient. OS commands share the eight-second inspection deadline;
-each of at most eight native-owned listeners gets at most 750 ms, including its OS commands.
+A listening port alone is insufficient. At most four native processes are inspected, with up to
+eight native-owned listeners per process. All inspections share an eight-second deadline; each
+listener gets at most 750 ms, including its OS commands.
 The same accepted socket, native process incarnation, instance and canonical home must survive
 both observations. Replaced images, reused PIDs, changed sockets, stale instances and ambiguous
 OS reads do not earn recovery credit.
@@ -70,10 +74,10 @@ hand off to that CLI through the Desktop terminal integration. A legacy npm-crea
 pins its own Bun/source entrypoint and bypasses that launcher. Root-owned Debian discovery covers
 that combination. A direct Bun/source CLI on macOS or Windows has no installation anchor here,
 even for an official signed Desktop; arbitrary unsigned per-user Linux copies have the same
-limitation. Names and files do not create an anchor. Use the matching bundled CLI or recreate
-the shim from Desktop. An independently observed Windows sibling remains unverified: it earns no
-recovery credit even when its on-disk signatures are valid, still refuses an unclaimed automatic
-cold start, and no longer vetoes the bounded wait a durable claim and running app already authorize.
+limitation. Names and files do not create an anchor. An independently observed Windows sibling
+remains unverified: it earns no recovery credit even when its on-disk signatures are valid, still
+refuses an unclaimed automatic cold start, and no longer vetoes the bounded wait a durable claim and
+running app already authorize.
 Explicit `ocx start` and the existing consented service installation flow remain user-controlled.
 
 `tests/service/service-desktop-recovery.test.ts` covers protocol, OS evidence races and a real Linux

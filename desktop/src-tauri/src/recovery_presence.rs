@@ -17,6 +17,7 @@ use std::{
 const DOMAIN: &str = "ocx-desktop-recovery-v1";
 const CONNECTION_BUDGET: Duration = Duration::from_secs(3);
 const MAX_CONNECTIONS: usize = 4;
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -128,6 +129,14 @@ impl Presence {
         instance: String,
         snapshot: Arc<dyn Fn() -> Snapshot + Send + Sync>,
     ) -> io::Result<Self> {
+        Self::start_with_accept(instance, snapshot, TcpListener::accept)
+    }
+
+    fn start_with_accept(
+        instance: String,
+        snapshot: Arc<dyn Fn() -> Snapshot + Send + Sync>,
+        mut accept: impl FnMut(&TcpListener) -> io::Result<(TcpStream, SocketAddr)> + Send + 'static,
+    ) -> io::Result<Self> {
         if !token(&instance, 32) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -141,7 +150,7 @@ impl Presence {
             .spawn(move || {
                 let active = Arc::new(AtomicUsize::new(0));
                 while !stop.load(Ordering::Acquire) {
-                    match listener.accept() {
+                    match accept(&listener) {
                         Ok((stream, _)) => {
                             if stop.load(Ordering::Acquire) {
                                 break;
@@ -164,8 +173,11 @@ impl Presence {
                                 active.fetch_sub(1, Ordering::AcqRel);
                             }
                         }
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
+                        Err(_) => {
+                            // Retain the listener after transient aborts or resource exhaustion.
+                            // Pace all errors, including interruptions, then recheck stop.
+                            thread::sleep(ACCEPT_ERROR_BACKOFF);
+                        }
                     }
                 }
             })?;
@@ -186,8 +198,135 @@ mod tests {
     use super::*;
     use std::{
         io::{BufRead, BufReader},
-        sync::Mutex,
+        sync::{mpsc, Mutex},
     };
+
+    struct Finished(mpsc::Sender<()>);
+
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    fn unresolved_snapshot() -> Snapshot {
+        Snapshot {
+            home: None,
+            wanted: true,
+        }
+    }
+
+    fn challenge(stream: &mut TcpStream) -> io::Result<String> {
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        stream.write_all(format!("{DOMAIN} {}\n", "b".repeat(64)).as_bytes())?;
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response)?;
+        Ok(response)
+    }
+
+    #[test]
+    fn accept_errors_retry_before_a_real_connection() {
+        for kind in [
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::Other,
+            io::ErrorKind::Interrupted,
+        ] {
+            let (injected, observed) = mpsc::channel();
+            let (finished, completion) = mpsc::channel();
+            let finished = Finished(finished);
+            let mut first = true;
+            let presence = Presence::start_with_accept(
+                "a".repeat(32),
+                Arc::new(unresolved_snapshot),
+                move |listener| {
+                    let _ = &finished;
+                    if first {
+                        first = false;
+                        let _ = injected.send(());
+                        return Err(kind.into());
+                    }
+                    listener.accept()
+                },
+            )
+            .unwrap();
+            observed.recv_timeout(Duration::from_secs(1)).unwrap();
+            // Only the error is injected; the next connection and response use the real socket.
+            let response =
+                TcpStream::connect(presence.address).and_then(|mut stream| challenge(&mut stream));
+            drop(presence);
+            completion.recv_timeout(Duration::from_secs(1)).unwrap();
+            let response = response.unwrap_or_else(|error| panic!("{kind:?}: {error}"));
+            assert!(response.starts_with(&format!("{DOMAIN} {} ", "b".repeat(64))));
+            assert!(response.ends_with(" unknown -\n"));
+        }
+    }
+
+    fn assert_persistent_accept_error_is_paced_and_stops(kind: io::ErrorKind) {
+        let (attempted, attempts) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let finished = Finished(finished);
+        let mut count = 0;
+        let presence =
+            Presence::start_with_accept("a".repeat(32), Arc::new(unresolved_snapshot), move |_| {
+                let _ = &finished;
+                // Do not throttle the loop in the injected operation, even when it spins.
+                if count < 3 {
+                    let _ = attempted.send(Instant::now());
+                }
+                count += 1;
+                Err(kind.into())
+            })
+            .unwrap();
+        let times: Result<Vec<_>, _> = (0..3)
+            .map(|_| attempts.recv_timeout(Duration::from_secs(1)))
+            .collect();
+        // Join the listener's lifetime signal before checking assertions, including a failed read.
+        drop(presence);
+        completion.recv_timeout(Duration::from_secs(1)).unwrap();
+        let times = times.unwrap_or_else(|error| panic!("{kind:?}: {error}"));
+        for pair in times.windows(2) {
+            assert!(
+                pair[1].duration_since(pair[0]) >= ACCEPT_ERROR_BACKOFF,
+                "{kind:?} retried without an error backoff"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_aborted_accept_errors_are_paced_and_stop() {
+        assert_persistent_accept_error_is_paced_and_stops(io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn persistent_resource_accept_errors_are_paced_and_stop() {
+        assert_persistent_accept_error_is_paced_and_stops(io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn persistent_interrupted_accept_errors_are_paced_and_stop() {
+        assert_persistent_accept_error_is_paced_and_stops(io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn a_fifth_reader_is_refused_while_four_challenged_readers_remain_open() {
+        let presence = Presence::start("a".repeat(32), Arc::new(unresolved_snapshot)).unwrap();
+        let mut readers = Vec::new();
+        let result = (|| -> io::Result<usize> {
+            for _ in 0..MAX_CONNECTIONS {
+                let mut stream = TcpStream::connect(presence.address)?;
+                let response = challenge(&mut stream)?;
+                assert!(response.ends_with(" unknown -\n"));
+                // A completed challenge proves each reader was admitted before trying the fifth.
+                readers.push(stream);
+            }
+            let mut extra = TcpStream::connect(presence.address)?;
+            extra.set_read_timeout(Some(Duration::from_secs(1)))?;
+            extra.read(&mut [0_u8; 1])
+        })();
+        drop(readers);
+        drop(presence);
+        assert_eq!(result.unwrap(), 0);
+    }
 
     #[test]
     fn fresh_challenges_observe_stop_without_replacing_the_listener() {
