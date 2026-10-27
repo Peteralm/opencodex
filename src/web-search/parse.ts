@@ -30,6 +30,8 @@ interface OutputItem {
   type?: string;
   content?: OutputTextBlock[];
 }
+/** Completed output text and citations; `incomplete` marks skipped malformed entries. */
+type CompletedOutput = WebSearchResult & { incomplete: boolean };
 
 // Keep this compatibility export for non-Responses sidecar executors and bounded error bodies.
 export const MAX_SIDECAR_RESPONSE_BYTES = 64 * 1024;
@@ -180,20 +182,27 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
   return { text: body, sources, stripped: true };
 }
 
-/** Pull final text + url_citation sources from a completed Responses `output[]` array. */
-function fromOutputArray(output: OutputItem[], seen: Set<string>): WebSearchResult {
+/**
+ * Pull final text + url_citation sources from a completed Responses `output[]` array.
+ * Malformed entries are skipped, and `incomplete` records that the text may be partial.
+ */
+function fromOutputArray(output: OutputItem[], seen: Set<string>): CompletedOutput {
   let text = "";
+  let incomplete = false;
   const sources: WebSearchSource[] = [];
   for (const item of output) {
-    if (!item || item.type !== "message" || !Array.isArray(item.content)) continue;
+    if (!item || typeof item !== "object") { incomplete = true; continue; }
+    if (item.type !== "message") continue;
+    if (!Array.isArray(item.content)) { incomplete = true; continue; }
     for (const block of item.content) {
-      if (block?.type === "output_text" && typeof block.text === "string") {
+      if (!block || typeof block !== "object") { incomplete = true; continue; }
+      if (block.type === "output_text" && typeof block.text === "string") {
         text += block.text;
         for (const ann of Array.isArray(block.annotations) ? block.annotations : []) collectAnnotation(ann, sources, seen);
       }
     }
   }
-  return { text, sources };
+  return { text, sources, incomplete };
 }
 
 export function cancelReaderWithoutWaiting(
@@ -225,7 +234,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   const acc: {
     deltaText: string;
     doneText: string;
-    final: WebSearchResult | null;
+    final: CompletedOutput | null;
     streamSources: WebSearchSource[];
     error: string | null;
     decodedChars: number;
@@ -345,9 +354,12 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   }
 
   // Prefer the authoritative completed output[], then the done text, then accumulated deltas.
-  const text = (acc.final?.text.trim() ? acc.final.text : "")
-    || acc.doneText.trim() && acc.doneText
-    || acc.deltaText;
+  // A completed output with malformed entries may be partial, so streamed text wins when present.
+  const streamedText = acc.doneText.trim() ? acc.doneText : acc.deltaText;
+  const completedText = acc.final?.text.trim() ? acc.final.text : "";
+  const text = acc.final?.incomplete && streamedText.trim()
+    ? streamedText
+    : completedText || streamedText;
   // Merge sources from the final output[] and the streaming annotation events.
   const sources = safeWebSearchSources(acc.final?.sources ?? []);
   for (const s of acc.streamSources) {

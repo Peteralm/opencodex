@@ -17,6 +17,22 @@ describe("search SSE field shapes", () => {
     ] } }]));
     expect(result).toEqual({ text: "kept", sources: [] });
   });
+  test("prefers streamed text over a completed output that skipped malformed entries", async () => {
+    const citation = { type: "url_citation", url: "https://example.com/second", title: "Second" };
+    const result = await parseSidecarSSE(response([
+      { type: "response.output_text.delta", delta: "First. Second." },
+      { type: "response.completed", response: { output: [
+        null, { type: "message", content: [{ type: "output_text", text: "Second.", annotations: [citation] }] },
+      ] } },
+    ]));
+    expect(result).toEqual({ text: "First. Second.", sources: [{ url: citation.url, title: citation.title }] });
+  });
+  test("keeps the completed text when malformed entries leave no streamed text", async () => {
+    const result = await parseSidecarSSE(response([{ type: "response.completed", response: { output: [
+      { type: "message", content: "not-an-array" }, { type: "message", content: [{ type: "output_text", text: "kept" }] },
+    ] } }]));
+    expect(result).toEqual({ text: "kept", sources: [] });
+  });
   test("does not expose non-string error messages", async () => {
     const result = await parseSidecarSSE(response([{ type: "response.failed", response: { error: { message: { raw: true } } } }]));
     expect(result.error).toBe("sidecar stream ended with response.failed");

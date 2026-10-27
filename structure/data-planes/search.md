@@ -58,4 +58,4 @@ selection, connection identity, or other ambient state; concurrent threads could
 credentials. Extending exact routing to those endpoints requires an opaque client correlation that
 can be bound server-side to a previously validated selector.
 
-The Responses sidecar parser in `src/web-search/parse.ts` checks runtime field shapes before consuming events: non-string types, non-array output/annotations and null content entries cannot throw away accumulated text. Failure messages remain strings; malformed message values use the existing terminal diagnostic.
+The Responses sidecar parser in `src/web-search/parse.ts` checks runtime field shapes before consuming events: non-string types, non-array output/annotations and null content entries cannot throw away accumulated text. When the completed output skipped a malformed entry, its text may be partial, so streamed done or delta text is preferred while the completed output's citations are kept. Failure messages remain strings; malformed message values use the existing terminal diagnostic.
