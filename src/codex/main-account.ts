@@ -1,3 +1,4 @@
+import { publishCredentialSync } from "../local-credentials/generation";
 import { observeMainDecisionCredentialUsable } from "./main-account-cache";
 import { classifyChatgptRefreshFailure, noteChatgptRefreshFailure } from "./chatgpt-refresh-failure";
 import { readBoundedResponseBody } from "../lib/bounded-body";
@@ -303,7 +304,7 @@ function persistRefreshedMainAuthJson(
     refresh_token: refreshToken,
     account_id: chatgptAccountId,
   };
-  atomicWriteFile(
+  publishCredentialSync(() => atomicWriteFile(
     expected.path,
     JSON.stringify({ ...expected.root, tokens }, null, 2) + "\n",
     undefined,
@@ -319,7 +320,7 @@ function persistRefreshedMainAuthJson(
       // the last look we get, so it asks everything it can rather than the cheap question.
       validateBeforeRename: () => assertMainAuthJsonSnapshotUnchanged(expected),
     },
-  );
+  ));
   advanceCodexCredentialMutationEpoch();
   return { accessToken, chatgptAccountId };
 }

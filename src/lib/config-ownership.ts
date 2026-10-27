@@ -53,6 +53,8 @@ const INITIAL_OWNED_PATHS = [
   "config-mutation.sqlite-journal",
   "config-mutation.sqlite-shm",
   "config-mutation.sqlite-wal",
+  "local-credentials.json",
+  "local-credential-observers",
   "crash.log",
   "kimi-device-id",
   "mimo-client-id",

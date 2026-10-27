@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "../config/atomic-write";
 import { linkDir, linkKnownHostsPath, linkStorePath } from "./paths";
 import { buildTunnelArgv } from "./ssh-argv";
+import { linkConnectionGeneration } from "./relay-auth";
 import { createSshRunner, type SshChild, type SshRunner } from "./ssh-runner";
 import type { LinkDiagnosticSink } from "./diagnostics";
 import { createTunnelHistoryBook, exitCause, type TunnelCause, type TunnelHistory } from "./tunnel-history";
@@ -48,6 +49,8 @@ export interface LinkSupervisor {
    */
   reconnect(linkId: string): Promise<boolean>;
   status(): readonly LinkTunnelStatus[];
+  /** `<runtime instance>:<generation>` of a Home-initiated link's current tunnel; every spawn changes it. */
+  connectionGeneration?(linkId: string): string | undefined;
   notifyAuthenticatedRequest?(apiKeyId: string): void;
   stop(): Promise<void>;
 }
@@ -407,6 +410,10 @@ export function createLinkSupervisor(deps: LinkSupervisorDeps = {}): LinkSupervi
     start() {
       if (lifecycleFlight) return;
       begin();
+    },
+    connectionGeneration(linkId) {
+      const generation = generations.get(linkId);
+      return generation === undefined || !children.has(linkId) ? undefined : linkConnectionGeneration(generation);
     },
     ensureStarted() {
       return runLifecycle(begin);

@@ -8,9 +8,11 @@ import { packageVersion } from "../lib/package-version";
 import { linkPeerReportHeaders } from "../link/peer-report";
 import { buildPeerFeatures } from "../remote/features";
 import {
-  LINK_RELAY_AUTH_PATH, LINK_RELAY_AUTH_TIMEOUT_MS, LINK_RELAY_AUTH_VERSION,
-  LINK_RELAY_PROBE_HEADER, LINK_RELAY_SESSION_HEADER, linkRelayChallenge, linkRelayProofMatches,
+  LINK_RELAY_AUTH_PATH, LINK_RELAY_AUTH_TIMEOUT_MS, LINK_RELAY_AUTH_VERSION, LINK_RELAY_CONNECTION_HEADER,
+  LINK_RELAY_CONNECTION_PROOF_HEADER, LINK_RELAY_PROBE_HEADER, LINK_RELAY_SESSION_HEADER, linkConnectionProof,
+  linkRelayChallenge, linkRelayProofMatches,
 } from "../link/relay-auth";
+import { recordVerifiedHomeConnection } from "./link-connection";
 
 export interface BoundLinkRelayTarget {
   tunnelPort: number;
@@ -172,6 +174,15 @@ function relayChallenge(target: BoundLinkRelayTarget, origin: URL) {
   return { challenge, probe, headers: peerReport };
 }
 
+/** Keep the Home's connection generation only when its proof binds it to this nonce and key. */
+function noteHomeConnection(target: BoundLinkRelayTarget, nonce: string, headers: IncomingMessage["headers"]): void {
+  const generation = headers[LINK_RELAY_CONNECTION_HEADER];
+  const proof = headers[LINK_RELAY_CONNECTION_PROOF_HEADER];
+  if (typeof generation !== "string" || typeof proof !== "string" || !target.linkId || !target.apiKeyId) return;
+  const expected = linkConnectionProof(serviceApiTokenFingerprint(target.admissionKey), target.apiKeyId, target.linkId, nonce, generation);
+  if (linkRelayProofMatches(proof, expected)) recordVerifiedHomeConnection(target.linkId, generation);
+}
+
 /**
  * The outcome of the credential-free preflight alone: `ok` when the Home answered with a proof
  * only the holder of the link key can make, `unrecognized` for a peer without the route (404),
@@ -201,7 +212,10 @@ export async function probeLinkRelayPreflight(
       method: "GET", signal: deadline.signal, headers: { ...request.headers, [LINK_RELAY_PROBE_HEADER]: "1" },
     }, agent);
     const proof = response.headers["x-opencodex-link-proof"];
-    if (response.statusCode === 204 && typeof proof === "string" && linkRelayProofMatches(proof, request.challenge.expected)) return "ok";
+    if (response.statusCode === 204 && typeof proof === "string" && linkRelayProofMatches(proof, request.challenge.expected)) {
+      noteHomeConnection(target, request.challenge.nonce, response.headers);
+      return "ok";
+    }
     return response.statusCode === 404 ? "unrecognized" : "auth_failed";
   } catch {
     return "unreachable";
@@ -236,6 +250,7 @@ export async function fetchBoundLinkRelay(
     if (response.statusCode !== 204 || typeof proof !== "string" || !linkRelayProofMatches(proof, challenge.expected)) {
       throw new LinkRelayAuthenticationError(response.statusCode === 404);
     }
+    noteHomeConnection(target, challenge.nonce, response.headers);
     // Drain the credential-free response before the Agent can reuse its socket.
     for await (const chunk of response) {
       if (chunk.length) throw new LinkRelayAuthenticationError();

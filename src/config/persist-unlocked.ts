@@ -1,3 +1,4 @@
+import { publishCredentialSync } from "../local-credentials/generation";
 import { normalizeAccountAutoPauseRevisions, observeAccountAutoPauseRevisions, snapshotAutoPauseFingerprints } from "./account-auto-pause-revisions";
 import { existsSync, readFileSync } from "node:fs";
 import { configReasoningPinsConfigError } from "./provider-validation";
@@ -96,7 +97,7 @@ export function persistConfigUnlocked(config: OcxConfig): boolean {
   let observedPublication = false;
   try {
     if (!unchanged) {
-      atomicWriteFile(configPath, bytes, undefined, { afterRename: () => { published = true; } });
+      publishCredentialSync(() => atomicWriteFile(configPath, bytes, undefined, { afterRename: () => { published = true; } }));
       published = true;
     }
     // Publication, not successful cache refresh, is the rollback boundary. A
