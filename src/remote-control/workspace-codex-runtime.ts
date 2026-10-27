@@ -292,7 +292,7 @@ export interface CodexRemoteWorkspaceRuntimeOptions {
   command?: readonly string[];
   env?: Record<string, string | undefined>;
   version?: string;
-  /** Test seam for the macOS exec-boundary check; production uses the real platform. */
+  /** Test seam for the exec-boundary platform check; production uses the real platform. */
   execDeps?: CodexExecBoundaryAsyncDeps;
 }
 
@@ -321,12 +321,18 @@ export class CodexRemoteWorkspaceRuntimeFactory implements RemoteWorkspaceRuntim
     if (command.length < 1) throw new Error("Codex CLI is unavailable on this Hub");
     const executablePath = isAbsolute(command[0]!) ? command[0]! : findExecutableOnPath(command[0]!);
     if (!executablePath) throw new Error("Codex CLI executable could not be resolved on this Hub");
+    const platform = this.options.execDeps?.platform ?? process.platform;
     // The checked canonical path is what the Hub execs, so a symlinked alias or a
-    // swapped bundle cannot route the app-server around the trust decision.
-    command[0] = await assertCodexExecTargetTrustedAsync(executablePath, {
+    // swapped bundle cannot route the app-server around the trust decision. On Windows
+    // the validated invocation for a .cmd/.bat target is the ComSpec wrapper: its file is
+    // the shell while the real command rides inside the /d /s /c args, so it cannot
+    // replace command[0] — the located executablePath stays and the launcher below
+    // rebuilds the escaped wrapper. On macOS the check returns the canonical binary.
+    const trustedTarget = await assertCodexExecTargetTrustedAsync(executablePath, {
       env: process.env,
       ...(this.options.execDeps ?? {}),
     });
+    command[0] = platform === "win32" ? executablePath : trustedTarget;
     const runtimeDirectory = dirname(realpathSync(executablePath));
     const isolation = mkdtempSync(join(tmpdir(), "ocx-remote-codex-"));
     let processPath = process.env.PATH ?? "/usr/bin:/bin";
@@ -375,7 +381,7 @@ export class CodexRemoteWorkspaceRuntimeFactory implements RemoteWorkspaceRuntim
       "-c", `${mcpPrefix}.enabled_tools=${JSON.stringify(options.tools)}`,
       "-c", `${mcpPrefix}.default_tools_approval_mode="approve"`,
       "app-server", "--listen", "stdio://",
-    ], { env: childEnv });
+    ], { env: childEnv, platform });
     let child: Bun.Subprocess<"pipe", "pipe", "pipe">;
     try {
       child = Bun.spawn([invocation.file, ...invocation.args], {

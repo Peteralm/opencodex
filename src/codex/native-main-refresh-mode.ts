@@ -110,6 +110,7 @@ export async function requestCodexAuthStatus(
       command, ["-c", 'model_provider="openai"', "app-server"],
       { env: process.env, signal: options.signal, ...(options.execDeps ?? {}) });
   } catch (cause) {
+    if (options.signal.aborted) throw options.signal.reason;
     if (cause instanceof CodexExecTrustError) {
       throw new CodexAuthStatusError("codex app-server target failed trust verification", { cause });
     }

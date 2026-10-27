@@ -36,7 +36,7 @@ unavailable, which is not the case.
 Click a layer name to see the text it sends. The dialog reads it from
 `codex debug prompt-input`, so it is the real thing rather than a description.
 
-The read has one caller budget (15 seconds by default), including time spent
+The read has one fixed 15-second caller budget, including time spent
 reading metadata and waiting on a shared probe. Synchronous metadata reads finish
 before expiry can be checked; an exhausted budget then prevents a new probe.
 If it expires, the dialog reports that the prompt

@@ -237,6 +237,21 @@ describe("macOS Codex exec boundary", () => {
     await expect(assertCodexExecTargetTrustedAsync(APP_BIN, h.boundary)).rejects.toThrow(CodexExecTrustError);
     expect(h.asyncCalls).toEqual([[BUNDLE, APP_BIN]]);
   });
+
+  for (const asyncMode of [false, true]) {
+    test(`an untrusted probe failure reason is redacted and bounded (async=${asyncMode})`, async () => {
+      const h = harness(); h.addApp();
+      h.state.trustReason = "signature mismatch under /home/tester/Applications/ChatGPT.app "
+        + "with password=hunter2 and sk-livetoken1234567 " + "x".repeat(300);
+      const result = asyncMode ? await resolveCodexRuntimeAsync(h.resolve) : resolveCodexRuntime(h.resolve);
+      const reason = result.failures.find(failure => failure.reason.includes("untrusted Codex exec target"))?.reason;
+      expect(reason).toContain("untrusted Codex exec target");
+      expect(reason).not.toContain("/home/tester");
+      expect(reason).not.toContain("hunter2");
+      expect(reason).not.toContain("sk-livetoken1234567");
+      expect(reason?.length).toBeLessThanOrEqual(160);
+    });
+  }
 });
 
 describe("exec boundary consumers", () => {

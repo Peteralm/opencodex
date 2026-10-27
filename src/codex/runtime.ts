@@ -525,7 +525,9 @@ function probeVersion(command: string, deps: ResolveCodexRuntimeDeps): VersionPr
     const { file, args, options } = versionProbeInvocation(deps, probeHome, target.invocation);
     return versionProbeOutput(exec(file, args, options), target.macAppBundle);
   } catch (error) {
-    if (error instanceof CodexExecTrustError) return { ok: false, reason: error.message };
+    if (error instanceof CodexExecTrustError) {
+      return { ok: false, reason: redactUserPath(redactSecretString(error.message)).slice(0, 160) };
+    }
     return versionProbeError(error, probeHome);
   } finally {
     removeProbeHome(probeHome);
@@ -594,7 +596,9 @@ async function probeVersionAsync(command: string, deps: ResolveCodexRuntimeDeps)
     const { file, args, options } = versionProbeInvocation(deps, probeHome, target.invocation);
     return versionProbeOutput(await exec(file, args, { ...options, signal: deps.signal }), target.macAppBundle);
   } catch (error) {
-    if (error instanceof CodexExecTrustError) return { ok: false, reason: error.message };
+    if (error instanceof CodexExecTrustError) {
+      return { ok: false, reason: redactUserPath(redactSecretString(error.message)).slice(0, 160) };
+    }
     return versionProbeError(error, probeHome);
   } finally {
     removeProbeHome(probeHome);
