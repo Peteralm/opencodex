@@ -37,9 +37,11 @@ Direct native routes remain separate. Translated Chat routes have their own guar
 
 For `stream: true`, native Responses combo children also fail an unmet required or named tool
 choice with `required_tool_contract_unsatisfied`. A fully held text-only completion can advance to
-another eligible target. Known reasoning frames may remain held within the existing bounded preflight.
-Text, tool events, unknown/opaque output and buffer limits commit the current target. After that
-boundary, missing calls produce `response.failed` without another target request; already delivered
+another eligible target. Known reasoning frames are held for at most one second from the first frame;
+later frames do not extend that deadline. Expiry releases the buffered stream and commits the target,
+preserving any pending upstream read. Text, tool events, unknown/opaque output and buffer limits also
+commit the current target. Namespace selectors and call echoes share the authorized alias restoration.
+After that boundary, missing calls produce `response.failed` without another target request; already delivered
 output and usage remain intact. Hosted execution evidence also prevents replay, even when the final
 snapshot omits it. Auto/none, incomplete results and unknown contracts retain their existing rules.
 

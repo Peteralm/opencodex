@@ -93,11 +93,43 @@ function terminal(text: string) {
 }
 
 describe("native streaming combo mandatory tools (#7456)", () => {
-  for (const platform of ["win32", "linux"] as const) test(`${platform}: normalized named calls agree with inspector and continuation`, async () => {
+  for (const platform of ["win32", "linux"] as const) for (const choice of [
+    { type: "function", namespace: "mcp", name: "ping" },
+    { type: "function", name: "mcp__ping" },
+  ]) for (const echo of ["mcp__ping", "mcp.ping"]) {
+    test(`${platform}: namespace selector ${JSON.stringify(choice)} and echo ${echo} agree`, async () => {
+      setRelayPlatformForTests(platform);
+      const sent: Array<Record<string, unknown>> = [];
+      const payload = { ...completed("m1", true), output: [{ type: "function_call", id: "fc_ping",
+        call_id: "call_ping", name: echo, arguments: "{}", status: "completed" }] };
+      const config = configFor(() => sse({ type: "response.completed", response: payload }), sent);
+      const models: string[] = [];
+      const statuses: string[] = [];
+      const text = await (await request(config, choice, undefined, { store: true,
+        tools: [{ type: "namespace", name: "mcp", tools: [{ type: "function", name: "ping", parameters: { type: "object", properties: {} } }] }],
+      }, {
+        onResponseComplete: (model: string) => models.push(model),
+        onNativePassthroughTerminal: (status: string) => statuses.push(status),
+      })).text();
+      const replay = expandPreviousResponseInput({ previous_response_id: "resp_m1",
+        input: [{ type: "function_call_output", call_id: "call_ping", output: "inert" }] });
+      expect({ terminal: terminal(text), statuses, models, replay }).toMatchObject({
+        terminal: [{ type: "response.completed", response: { output: [{ name: "ping", namespace: "mcp", call_id: "call_ping" }] } }],
+        statuses: ["completed"], models: ["m1"],
+        replay: { input: expect.arrayContaining([expect.objectContaining({ type: "function_call", name: "ping", namespace: "mcp", call_id: "call_ping" })]) },
+      });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.tool_choice).toEqual({ type: "function", name: "mcp__ping" });
+    });
+  }
+  for (const platform of ["win32", "linux"] as const) for (const echo of [
+    { name: "default.marker_func" },
+    { name: "marker_func", namespace: "marker_func" },
+  ]) test(`${platform}: normalized named call ${JSON.stringify(echo)} agrees with inspector and continuation`, async () => {
     setRelayPlatformForTests(platform);
     const sent: Array<Record<string, unknown>> = [];
     const payload = completed("m1", true);
-    payload.output = [{ ...completed("m1", true).output[0]!, name: "default.marker_func" }];
+    payload.output = [{ ...completed("m1", true).output[0]!, ...echo }];
     const config = configFor(() => sse({ type: "response.completed", response: payload }), sent);
     const models: string[] = [];
     const statuses: string[] = [];

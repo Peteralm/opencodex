@@ -69,14 +69,17 @@ import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson } from "..
 import {
   createSelfNamedToolCallNamespaceScrubRewrite,
   scrubSelfNamedToolCallNamespaceInJson,
+  scrubSelfNamedToolCallNamespace,
 } from "../responses-self-named-namespace-scrub";
 import {
   createMuseToolNameRestoreRewrite,
   restoreMuseToolNamesInJson,
+  restoreMuseToolNames,
 } from "../../responses/muse-tool-name-alias";
 import {
   createRoutedNamespaceCallRestoreRewrite,
   restoreRoutedNamespaceCallsInJson,
+  restoreRoutedNamespaceCalls,
 } from "../../responses/namespace-tool-compat";
 import {
   hasResponsesItemIdRepair,
@@ -826,16 +829,21 @@ export async function deliverPassthroughResponse(
         : undefined;
       const maskCredential = createOutboundCredentialMask(nativeExchange.request.headers);
       const requiredStreamEvidence = { replayUnsafe: !!webSearchBridgePlan };
+      const normalizeRequiredToolItem = (item: unknown) => {
+        item = scrubSelfNamedToolCallNamespace(item, selfNamedNamespaceScrubAuthorization).value;
+        item = restoreMuseToolNames(item, responseEffects.routedMuseToolNameAliases).value;
+        item = restoreRoutedNamespaceCalls(item, responseEffects.routedNamespaceToolAliases).value;
+        item = restoreRoutedNamespaceCalls(item, authorizedBareNamespaceToolAliases).value;
+        return normalizeDefaultNamespaceInItem(item, declaredWireToolNames, declaredBareWireToolNames).value;
+      };
       const requiredStreamGuard = options.comboAttempt && clientRequestedStream === true
         && (options.inboundWire === undefined || options.inboundWire === "responses")
         && route.provider.adapter === "openai-responses" && !isNonReplayableResponse(upstreamResponse)
-        ? createComboRequiredToolStreamGuard(parsed._rawBody, providerExecutedCallTypes, requiredStreamEvidence)
+        ? createComboRequiredToolStreamGuard(parsed._rawBody, providerExecutedCallTypes,
+          requiredStreamEvidence, normalizeRequiredToolItem)
         : undefined;
-      // Raw inspection uses outbound aliases; client validation runs after their restoration.
-      const requiredStreamInspector = requiredStreamGuard
-        ? createComboRequiredToolStreamGuard(nativeExchange.outboundRequestBody, providerExecutedCallTypes, requiredStreamEvidence,
-          item => normalizeDefaultNamespaceInItem(item, declaredWireToolNames, declaredBareWireToolNames).value)
-        : undefined;
+      // The factory creates independent raw/client state with one tool identity resolver.
+      const requiredStreamInspector = requiredStreamGuard;
       const blockRewrites = [
         payloadRewrites.length > 0
           ? payloadRewriteAsBlockRewrite(composeSsePayloadRewrites(...payloadRewrites))

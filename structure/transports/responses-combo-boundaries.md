@@ -32,18 +32,24 @@ contract. Completed item events and terminal snapshots can satisfy it; a call st
 Missing calls turn `response.completed` into `response.failed` with
 `required_tool_contract_unsatisfied`, retaining response identity, output and usage.
 The client rewrite judges restored calls before continuation observers and hosted-image display.
-The existing raw inspector judges outbound aliases with catalog-aware default-namespace normalization before reporting a terminal or persisting
-completion; both eager and tee relays retain their readers and cancellation owners.
+The raw inspector and client guard resolve selectors and observed calls through the same authorized
+Muse/namespace alias maps, authorized self-named scrub and catalog-aware default-namespace normalization.
+They compare name and namespace (the reserved `functions` group is bare) before reporting terminals
+or persisting completion. Eager and tee retain their readers and cancellation owners.
 Provider-owned custom calls retain their call-ID-prefix ownership. Hosted effects, unknown items,
 and the local web-search bridge make the verdict non-replayable, including sparse terminal snapshots.
 
 Only this mandatory native contract extends preflight to hold known reasoning frames. It keeps the
-existing aggregate byte/chunk caps and commits on text, tool events, opaque/unknown events or either
-cap. A missing-call terminal held before commitment becomes the existing 502 combo failure; another
+existing aggregate byte/chunk caps and a fixed `COMBO_REQUIRED_TOOL_REASONING_HOLD_MS` deadline of
+1,000 ms from the first held reasoning frame in `src/server/responses/combo-stream-preflight.ts`.
+Trickling frames do not reset it. Deadline expiry, text, tools, opaque/unknown events or either cap
+commit this child; expiry releases held bytes and transfers the pending read to the existing relay,
+preserving its eventual chunk or error exactly once without authorizing replay. A missing-call
+terminal held before commitment becomes the existing 502 combo failure; another
 target remains subject to eligibility, consent and budgets. After commitment the typed failed
 terminal remains with that child. Lifecycle snapshots with output and failed/incomplete snapshots
 with output commit conservatively; only a checked missing-call terminal with harmless text/reasoning
-may be discarded. Cancellation wakes a pending preflight read and is checked before parent success.
+may be discarded. Cancellation wakes a pending read; every exit clears the hold timer and checks cancellation before parent success.
 Auto/none, unknown contracts, direct native routes, Chat and runTurn keep their terminal owners.
 Coverage: `tests/server/server-combo-stream-required-tool.test.ts` and
 `tests/routing/combo-required-tool-stream-preflight.test.ts`.

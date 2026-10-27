@@ -15,6 +15,8 @@ const reasoningEvents = new Set([
   "response.reasoning_text.delta", "response.reasoning_text.done",
 ]);
 const controlEvents = new Set(["response.created", "response.in_progress", "response.queued", "response.heartbeat"]);
+// Codex's reserved functions group denotes the same identity as a bare tool.
+const toolNamespace = (item: { namespace?: unknown }) => item.namespace === "functions" ? undefined : item.namespace;
 
 /** Only known reasoning frames may extend a mandatory-tool prelude; other traffic commits. */
 export function requiredToolReasoningPrelude(payload: unknown): boolean {
@@ -25,7 +27,7 @@ export function requiredToolReasoningPrelude(payload: unknown): boolean {
 }
 
 /** In-place projection is shared by the existing inspection and client rewrite owners. */
-function terminalGuard(requirement: RequiredToolContract, ownership: ReadonlySet<ProviderExecutedCallType>, evidence: { replayUnsafe: boolean }, normalizeItem: (item: unknown) => unknown) {
+function terminalGuard(requirement: RequiredToolContract & { namespace?: unknown }, ownership: ReadonlySet<ProviderExecutedCallType>, evidence: { replayUnsafe: boolean }, normalizeItem: (item: unknown) => unknown) {
   let fulfilled = false;
   const observe = (value: unknown, complete: boolean) => {
     const item = record(normalizeItem(value));
@@ -35,7 +37,8 @@ function terminalGuard(requirement: RequiredToolContract, ownership: ReadonlySet
     const hostedCall = typeof item.type === "string" && item.type.endsWith("_call") && !clientCall;
     if (providerExecuted || hostedCall) evidence.replayUnsafe = true;
     if (complete && item.status !== "in_progress" && item.status !== "incomplete" && item.status !== "failed") {
-      fulfilled ||= clientCall && (requirement.kind === "any" || typeof item.name !== "string" || item.name === requirement.name)
+      fulfilled ||= clientCall && (requirement.kind === "any" || typeof item.name !== "string"
+        || item.name === requirement.name && toolNamespace(item) === toolNamespace(requirement))
         || requirement.kind === "any" && requirement.hostedCallTypes.has(String(item.type));
     }
     if (!clientCall && !hostedCall && item.type !== "message" && item.type !== "reasoning") evidence.replayUnsafe = true;
@@ -73,8 +76,15 @@ export function createComboRequiredToolStreamGuard(
   rawBody: unknown, ownership: ReadonlySet<ProviderExecutedCallType>, evidence = { replayUnsafe: false },
   normalizeItem: (item: unknown) => unknown = item => item,
 ) {
-  const requirement = requiredToolContractOf(rawBody);
-  if (!requirement) return undefined;
+  const contract = requiredToolContractOf(rawBody);
+  if (!contract) return undefined;
+  // Selectors and observations must resolve through the very same authorized restoration.
+  const choice = record(record(rawBody)?.tool_choice);
+  const selected = contract.kind === "named" ? record(normalizeItem({ ...choice,
+    type: choice?.type === "custom" ? "custom_tool_call" : "function_call",
+  })) : undefined;
+  const requirement = contract.kind === "named" && typeof selected?.name === "string"
+    ? { ...contract, name: selected.name, namespace: selected.namespace } : contract;
   const clientGuard = terminalGuard(requirement, ownership, evidence, normalizeItem);
   return {
     rememberCompleted(response: RecordValue, remember: (response: RecordValue) => void) {
@@ -86,6 +96,12 @@ export function createComboRequiredToolStreamGuard(
         ...handlers,
         onOpaquePayload(payload) { if (payload !== "[DONE]") guard.opaque(); handlers.onOpaquePayload?.(payload); },
         onParsedPayload(payload) {
+          // Every raw observer, including continuation admission, sees the identity
+          // authorized by client restoration rather than an alternate wire spelling.
+          const event = record(payload);
+          if (event?.item !== undefined) event.item = normalizeItem(event.item);
+          const response = record(event?.response);
+          if (Array.isArray(response?.output)) response.output = response.output.map(normalizeItem);
           // Inspection has parsed metadata but has not reported a terminal or persisted output yet.
           if (guard.project(payload) && handlers.logCtx) {
             inspectResponseLogSsePayloadParsed(handlers.logCtx, JSON.stringify(payload), payload);

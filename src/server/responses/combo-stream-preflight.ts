@@ -11,6 +11,8 @@ import { REQUIRED_TOOL_CONTRACT_CODE } from "../../lib/errors";
 import { requiredToolReasoningPrelude } from "./combo-required-tool-stream";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
+// Required-tool reasoning may delay delivery, but never for an unbounded/trickling prelude.
+const COMBO_REQUIRED_TOOL_REASONING_HOLD_MS = 1_000;
 // Keep retained object count proportional to the same byte budget used by the
 // shared SSE framer. Tiny or empty upstream reads must not bypass the byte cap.
 const COMBO_STREAM_PREFLIGHT_MAX_CHUNKS = Math.max(
@@ -192,6 +194,7 @@ function replayBufferedResponse(
   response: Response,
   reader: ReadableStreamDefaultReader<Uint8Array>,
   buffered: Uint8Array[],
+  pendingRead?: ReturnType<typeof reader.read>,
 ): Response {
   let index = 0;
   const body = new ReadableStream<Uint8Array>({
@@ -201,7 +204,8 @@ function replayBufferedResponse(
         return;
       }
       try {
-        const next = await reader.read();
+        const next = await (pendingRead ?? reader.read());
+        pendingRead = undefined;
         if (next.done) controller.close();
         else controller.enqueue(next.value);
       } catch (error) {
@@ -308,6 +312,8 @@ export async function preflightComboStreamResponse(
   let responseCreated = false;
   let terminalStatus: ResponsesTerminalStatus | undefined;
   let retryableTerminalPayload: Record<string, unknown> | undefined;
+  let holdTimer: ReturnType<typeof setTimeout> | undefined;
+  let holdDeadline: Promise<"hold-expired"> | undefined;
   const inspector = createSseInspector({
     logCtx,
     // A payload the inspector could not parse still reached this proxy, and it may be output.
@@ -323,6 +329,9 @@ export async function preflightComboStreamResponse(
       // A zero-output bare error is terminal evidence. Explicit client errors stay
       // committed; unknown and retryable upstream failures may advance the combo.
       const heldReasoning = options?.requiredToolPrelude && requiredToolReasoningPrelude(payload);
+      if (heldReasoning) holdDeadline ??= new Promise(resolve => {
+        holdTimer = setTimeout(() => resolve("hold-expired"), COMBO_REQUIRED_TOOL_REASONING_HOLD_MS);
+      });
       if (comboStreamPayloadCommitsOutput(payload) && !matchedBareError && !heldReasoning) outputCommitted = true;
       if (options?.requiredToolPrelude && payload && typeof payload === "object") {
         const event = payload as { type?: unknown; response?: { output?: unknown; error?: { code?: unknown; retryable?: unknown } } };
@@ -346,8 +355,15 @@ export async function preflightComboStreamResponse(
       options?.signal?.throwIfAborted();
       let next: Awaited<ReturnType<typeof reader.read>>;
       try {
-        next = await reader.read();
+        const pendingRead = reader.read();
+        const observed = await (holdDeadline ? Promise.race([pendingRead, holdDeadline]) : pendingRead);
         options?.signal?.throwIfAborted();
+        if (observed === "hold-expired") {
+          // Expiry commits this child. Hand the in-flight read to the relay so its
+          // eventual chunk/error is delivered exactly once, never lost to the race.
+          return { kind: "accepted", response: replayBufferedResponse(response, reader, buffered, pendingRead) };
+        }
+        next = observed;
       } catch (error) {
         if (!options?.replayReadErrors) throw error;
         // The native relay still owns post-header transport failures. Preserve
@@ -393,6 +409,7 @@ export async function preflightComboStreamResponse(
       }
     }
   } finally {
+    if (holdTimer !== undefined) clearTimeout(holdTimer);
     options?.signal?.removeEventListener("abort", cancelRead);
     inspector.dispose();
   }
