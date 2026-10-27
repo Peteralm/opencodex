@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { windowsOcxArgv, windowsNativeArgv, windowsChildHttpArgv, powershellArgv } from "../../src/link/remote-windows";
+import { windowsOcxArgv, windowsNativeArgv, windowsChildHttpArgv, powershellArgv, windowsScriptData } from "../../src/link/remote-windows";
 import { quoteRemote, REMOTE_OCX_SCRIPT, remoteOcxArgv } from "../../src/link/ssh-argv";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { spawnTestChild } from "../helpers/spawn-test-child";
@@ -253,3 +253,11 @@ test.skipIf(!OPENSSH_FIXTURE)("dropping a real OpenSSH channel kills the contain
   }
   expect(state).toBe("gone");
 }, 90_000);
+
+test("the shared fixture decoder reads back exactly the arguments the Windows builders encode", () => {
+  const args = ["connect", "--link", "--key-stdin", "--tunnel-port", "2200", "--link-id", "lnk_0123456789abcdef", "", "space 'q' \"d\" 雪"];
+  const script = (argv: string[]) => Buffer.from(argv[5]!, "base64").toString("utf16le");
+  expect(windowsScriptData(script(windowsOcxArgv(args)))).toEqual({ args });
+  expect(windowsScriptData(script(windowsNativeArgv("C:\\fixture\\ocx.exe", args)))).toEqual({ executable: "C:\\fixture\\ocx.exe", args });
+  expect(windowsScriptData(script(windowsChildHttpArgv(10100, "healthz", 100)))).toBeUndefined();
+});

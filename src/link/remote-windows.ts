@@ -36,11 +36,27 @@ function Quote-Native([string]$v){'"'+[regex]::Replace([regex]::Replace($v,'(\\*
 function Invoke-Native([string]$e,[string[]]$a){try{$c=[OcxJob]::Run($e,((@($e)+$a|%{Quote-Native $_}) -join ' '))}catch{Fail};exit $c}
 `;
 
+/** The one line that carries the argument object; builder and decoder share these constants. */
+const DATA_OPEN = "$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('";
+const DATA_CLOSE = "'))|ConvertFrom-Json\n";
+
 function dataLine(value: { executable?: string; args: readonly string[] }): string {
   if ([value.executable ?? "", ...value.args].some(item => item.includes("\0"))) throw new Error("Remote argument contains NUL");
   // An object wrapper: Windows PowerShell 5.1 emits a top-level JSON array unenumerated.
-  const data = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
-  return `$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}'))|ConvertFrom-Json\n`;
+  return DATA_OPEN + Buffer.from(JSON.stringify(value), "utf8").toString("base64") + DATA_CLOSE;
+}
+
+/**
+ * The argument object a script from this module carries, read back from its decoded script text;
+ * undefined for any other script. Test fixtures decode with this, never with their own pattern.
+ */
+export function windowsScriptData(script: string): { executable?: string; args: string[] } | undefined {
+  const start = script.indexOf(DATA_OPEN);
+  const end = start < 0 ? -1 : script.indexOf(DATA_CLOSE, start + DATA_OPEN.length);
+  if (end < 0) return undefined;
+  const value: unknown = JSON.parse(Buffer.from(script.slice(start + DATA_OPEN.length, end), "base64").toString("utf8"));
+  if (!value || typeof value !== "object" || !Array.isArray((value as { args?: unknown }).args)) return undefined;
+  return value as { executable?: string; args: string[] };
 }
 
 export function windowsNativeArgv(executable: string, args: readonly string[]): string[] {

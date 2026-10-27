@@ -8,6 +8,7 @@ import type { OcxConfig } from "../../src/types";
 import type { LinkStore } from "../../src/link/store";
 import { SshRunnerError, type SshRunner, type SshRunResult } from "../../src/link/ssh-runner";
 import { quoteRemote, remoteOcxArgv, WINDOWS_OS_PROBE } from "../../src/link/ssh-argv";
+import { windowsScriptData } from "../../src/link/remote-windows";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let root: string;
@@ -80,11 +81,8 @@ function harness(remotePlatform: "posix" | "windows" = "posix") {
     async run(argv, options) {
       const command = argv.at(-1) ?? "";
       const decoded = command.startsWith("powershell.exe ") ? Buffer.from(command.split(" ").at(-1)!, "base64").toString("utf16le") : command;
-      // remote-windows.ts carries the arguments as `$d=Read-Data '<base64 of {"args":[...]}>'`.
-      const payload = /\$d=Read-Data '([^']+)'/.exec(decoded)?.[1];
-      const nativeArgs: string[] | undefined = payload
-        ? (JSON.parse(Buffer.from(payload, "base64").toString("utf8")) as { args: string[] }).args
-        : undefined;
+      // Decoded with the builder's own reader, so the fixture follows the emitted format.
+      const nativeArgs = command.startsWith("powershell.exe ") ? windowsScriptData(decoded)?.args : undefined;
       const step: Step = argv[0] === "ssh-keygen" ? "fingerprint"
         : command === "echo ocx-link-probe" ? "probe"
         : command === WINDOWS_OS_PROBE ? "windows"
