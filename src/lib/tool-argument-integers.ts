@@ -237,6 +237,7 @@ function coerceValue(
 }
 
 const JSON_STRING_OR_NUMBER = /"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+const INTEGRAL_FLOAT_TOKEN = /^-?(?:0|[1-9]\d*)\.0+$/;
 
 /**
  * Mask numbers before schema traversal and retain their original positions. A prefix absent
@@ -244,12 +245,21 @@ const JSON_STRING_OR_NUMBER = /"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[e
  * Applying repairs to the original text also preserves tokens hidden by duplicate keys.
  */
 function maskNumberTokens(json: string): { masked: string; numbers: Map<string, NumberToken> } {
-  const strings: string[] = [];
+  // One pass collects the tag that follows the base prefix in every colliding decoded string;
+  // the smallest unused tag then yields a prefix no input string can start with. This stays
+  // linear in the input, unlike growing the prefix and rescanning every string.
+  const base = "\u0000ocx-number:";
+  const usedTags = new Set<string>();
   for (const [raw] of json.matchAll(JSON_STRING_OR_NUMBER)) {
-    if (raw.startsWith('"')) strings.push(JSON.parse(raw) as string);
+    if (!raw.startsWith('"')) continue;
+    const value = JSON.parse(raw) as string;
+    if (!value.startsWith(base)) continue;
+    const end = value.indexOf(":", base.length);
+    if (end >= 0) usedTags.add(value.slice(base.length, end));
   }
-  let prefix = "\u0000ocx-number:";
-  while (strings.some(value => value.startsWith(prefix))) prefix += ":";
+  let tag = 0;
+  while (usedTags.has(String(tag))) tag += 1;
+  const prefix = `${base}${tag}:`;
   const numbers = new Map<string, NumberToken>();
   const masked = json.replace(JSON_STRING_OR_NUMBER, (raw: string, start: number) => {
     if (raw.startsWith('"')) return raw;
@@ -300,11 +310,14 @@ export function coerceIntegerToolArguments(
   const chunks: string[] = [];
   let cursor = 0;
   for (const token of numbers.values()) {
-    // Unrepaired tokens are normalized only when that is lossless (a safe integral value such
-    // as 2.0), matching the previous re-serialization; any other decimal and every unsafe
-    // integer keeps its exact source text, so no unrepaired value is rounded.
-    const number = Number(token.raw);
-    const replacement = token.replacement ?? (Number.isSafeInteger(number) ? JSON.stringify(number) : token.raw);
+    // Unrepaired tokens are normalized only when the source text itself is an integral float
+    // (digits, then a fraction of zeros) with a safe value, such as 2.0, matching the previous
+    // re-serialization. Every other token, including 9007199254740990.5 and exponent forms,
+    // keeps its exact source text, so no unrepaired value is rounded.
+    const replacement = token.replacement
+      ?? (INTEGRAL_FLOAT_TOKEN.test(token.raw) && Number.isSafeInteger(Number(token.raw))
+        ? JSON.stringify(Number(token.raw))
+        : token.raw);
     chunks.push(args.slice(cursor, token.start), replacement);
     cursor = token.start + token.raw.length;
   }

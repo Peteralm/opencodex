@@ -62,9 +62,23 @@ describe("tool argument numeric preservation", () => {
     expect(coerceIntegerToolArguments('{"count":1.0,"value":"9007199254740993"}', schema))
       .toBe('{"count":1,"value":"9007199254740993"}');
   });
-  test("keeps unrepaired non-integral decimals in their original text", () => {
-    expect(coerceIntegerToolArguments('{"count":1.0,"amount":0.12345678901234567890,"ratio":1.50,"big":1E2}', schema))
-      .toBe('{"count":1,"amount":0.12345678901234567890,"ratio":1.50,"big":100}');
+  test("keeps unrepaired decimals and exponent forms in their original text", () => {
+    expect(coerceIntegerToolArguments(
+      '{"count":1.0,"id":9007199254740993,"amount":0.123456789012345678901,"near":9007199254740990.5,"ratio":1.50,"big":1E2,"plain":2.0}',
+      schema,
+    )).toBe('{"count":1,"id":9007199254740993,"amount":0.123456789012345678901,"near":9007199254740990.5,"ratio":1.50,"big":1E2,"plain":2}');
+  });
+  test("placeholder selection avoids colliding strings and stays linear in the input", () => {
+    const colliding = '{"count":1.0,"a":"\\u0000ocx-number:0:0","b":"\\u0000ocx-number:1:x"}';
+    expect(coerceIntegerToolArguments(colliding, schema))
+      .toBe('{"count":1,"a":"\\u0000ocx-number:0:0","b":"\\u0000ocx-number:1:x"}');
+    const hostile = `{"count":1.0,"note":"\\u0000ocx-number:${":".repeat(512 * 1024)}"}`;
+    const started = performance.now();
+    const repaired = coerceIntegerToolArguments(hostile, schema);
+    const elapsedMs = performance.now() - started;
+    expect(repaired.startsWith('{"count":1,"note":')).toBe(true);
+    // The previous prefix search rescanned the input once per colon (16 s for this input).
+    expect(elapsedMs).toBeLessThan(2_000);
   });
   test.each([false, true])("bridge preserves unsafe tokens and repairs siblings (stream=%s)", async stream => {
     const events: AdapterEvent[] = [
