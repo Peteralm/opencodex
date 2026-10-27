@@ -267,7 +267,7 @@ stand down in `maybeRequestStorageCleanupPolicyRun` (`src/storage/policy-job.ts`
 
 After `PUT /api/native-integrations/claude-desktop` persists its intent, and whenever the Desktop mode marker is
 persisted, the route adopts the committed state into the running server config, because the Claude intercept's
-per-request first-party callback reads that live object; a failed write leaves it unchanged.
+per-request first-party callback reads that live object; a failed write leaves it unchanged. An ACL admission timeout after that intent commit returns the post-commit refusal with its committed `desiredEnabled` and an incomplete cleanup/apply message; only refusal before commit claims nothing was written.
 
 | Endpoint area | Responsibility |
 | --- | --- |

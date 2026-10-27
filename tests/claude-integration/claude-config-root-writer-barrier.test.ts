@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import * as management from "../../src/server/management-api";
 import * as paths from "../../src/config/paths";
-import { applyProfile } from "../../src/cli/claude-desktop";
+import { applyDesktop, applyProfile } from "../../src/cli/claude-desktop";
+import * as firstParty from "../../src/claude/desktop-first-party";
+import { setLocalCaWindowsAclRunnerForTests } from "../../src/claude/intercept/local-ca-windows";
 import { ensureClaudeDesktopMatchesDesired, type EnsureDesiredIntegrationsDeps } from "../../src/cli/ensure-desired-integrations";
 import { syncEnabledClientIntegrations } from "../../src/server/management/config-routes";
-import { removeDesktop3pStandardPivot, writeDesktop3pConfig } from "../../src/claude/desktop-3p";
+import { inspectDesktop3pConfigLibrary, removeDesktop3pStandardPivot, writeDesktop3pConfig } from "../../src/claude/desktop-3p";
 import { resolveDesktop3pConfigLibraryPath } from "../../src/claude/desktop-3p-library";
 import { resetHardenedStateForTests, setAsyncIcaclsBeltSchedulerForTests, setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests, setNowForTests, setPlatformForTests, windowsSecretAclReapPendingForPath, type IcaclsResult } from "../../src/lib/windows-secret-acl";
 import { setSyntheticWindowsPrincipalForTests } from "../../src/lib/windows-user-principal";
@@ -47,6 +49,7 @@ afterEach(async () => {
   setAsyncIcaclsBeltSchedulerForTests(null);
   setNowForTests(null);
   setIcaclsRunnerForTests(null);
+  setLocalCaWindowsAclRunnerForTests(null);
   setPlatformForTests(null);
   setSyntheticWindowsPrincipalForTests(null);
   resetHardenedStateForTests();
@@ -55,6 +58,128 @@ afterEach(async () => {
     else process.env[key] = previous[index];
   });
   removeTreeWithRetry(root);
+});
+
+async function seedLateTimeoutGateway() {
+  const config = fixture();
+  config.claudeCode = { desktopMode: "gateway", intercept: { picker: false } };
+  config.clientIntegrations = { "claude-desktop": true };
+  writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  setAsyncIcaclsRunnerForTests(async () => success);
+  const seeded = writeDesktop3pConfig(10100, [], [], undefined, "static", undefined, undefined, { lockPath: join(root, "lifecycle.sqlite") });
+  expect(seeded.written).toBe(true);
+  config.claudeCode.desktopProfile = { version: 1, assignments: {}, defaults: { opus: null, fable: null, sonnet: null, haiku: null }, appliedFingerprint: seeded.fingerprint };
+  writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  await paths.flushConfigDirHardeningAndReaps(root);
+  return config;
+}
+
+function lateTimeoutRequest(config: OcxConfig, surface: "api" | "native", enabled = true) {
+  const url = new URL(`http://127.0.0.1:10100${surface === "api" ? "/api/claude-desktop/apply" : "/api/native-integrations/claude-desktop"}`);
+  return management.handleManagementAPI(new Request(url, {
+    method: surface === "api" ? "POST" : "PUT", headers: { Host: url.host, "content-type": "application/json" },
+    body: JSON.stringify(surface === "api" ? { mode: "first-party" } : { enabled }),
+  }), url, config, { ensureClaudeIntercept: async () => ({ ok: true, state: {
+    proxyPort: 10200, caCertPath: join(root, "claude-intercept", "ca.pem"), pickerProxyPort: null,
+  } }) }, "admin-token", undefined, { trustedLoopback: true });
+}
+
+test("native OFF late admission timeout preserves committed intent in its refusal", async () => {
+  const config = await seedLateTimeoutGateway(), time = clock(), started = deferred();
+  let parent: ReturnType<typeof holdParent> | undefined;
+  const original = firstParty.removeDesktopFirstPartySettled;
+  const hook = spyOn(firstParty, "removeDesktopFirstPartySettled").mockImplementation(async (...args) => {
+    const removed = await original(...args);
+    resetHardenedStateForTests(); parent = holdParent(); started.resolve();
+    return removed;
+  });
+  restores.push(() => hook.mockRestore());
+  const work = lateTimeoutRequest(config, "native", false);
+  try {
+    await Promise.race([started.promise, work.then(() => { throw new Error("request completed before the late flight"); })]);
+    await parent!.entered; await parent!.reached; await turn();
+    time.advance(1000);
+    const response = await work, body = await response!.json();
+    expect(response!.status).toBe(500);
+    expect(JSON.parse(readFileSync(join(root, "config.json"), "utf8")).clientIntegrations["claude-desktop"]).toBe(false);
+    expect(config.clientIntegrations?.["claude-desktop"]).toBe(false);
+    expect(body).toMatchObject({ code: "native_integration_failed", clientId: "claude-desktop", reason: "write_failed", desiredEnabled: false });
+    expect(body.message).toContain("cleanup");
+    expect(body.message).not.toContain("Nothing was written");
+    expect(JSON.stringify(body)).not.toContain(JSON.stringify(root).slice(1, -1));
+    expect(parent!.descendants).toEqual([]);
+    time.advance(100_000); await paths.flushConfigDirHardening(root);
+    expect(windowsSecretAclReapPendingForPath(root)).toBe(true);
+  } finally { parent?.release(); await work; }
+});
+
+test.each([
+  ["cli", false], ["api", false], ["native", false],
+  ["cli", true], ["api", true], ["native", true],
+] as const)("%s late admission timeout enters settled rollback (released=%s)", async (surface, releaseForRollback) => {
+  const config = await seedLateTimeoutGateway(), time = clock(), started = deferred();
+  if (surface === "native") {
+    config.claudeCode!.desktopMode = "first-party";
+    writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  }
+  mkdirSync(join(root, "claude"), { recursive: true });
+  const settings = join(root, "claude", "settings.json"), originalSettings = { env: { KEEP: "fixture" } };
+  writeFileSync(settings, JSON.stringify(originalSettings));
+  setLocalCaWindowsAclRunnerForTests(() => ({ ...success, stdout: JSON.stringify({
+    owner: "S-1-5-21-1-2-3-1001", protected: true,
+    rules: [{ sid: "S-1-5-21-1-2-3-1001", type: 0, rights: 2032127 }],
+  }) }));
+  let parent: ReturnType<typeof holdParent> | undefined;
+  const originalApply = firstParty.applyDesktopFirstParty;
+  const hook = spyOn(firstParty, "applyDesktopFirstParty").mockImplementation((...args) => {
+    const applied = originalApply(...args);
+    expect(applied.ok).toBe(true);
+    queueMicrotask(() => { resetHardenedStateForTests(); parent = holdParent(); started.resolve(); });
+    return applied;
+  });
+  const originalRollback = firstParty.rollbackDesktopFirstPartySettled;
+  const rollback = spyOn(firstParty, "rollbackDesktopFirstPartySettled").mockImplementation(async (...args) => {
+    if (releaseForRollback) { parent!.release(); await paths.flushConfigDirHardeningAndReaps(root); }
+    return originalRollback(...args);
+  });
+  restores.push(() => hook.mockRestore(), () => rollback.mockRestore());
+  const work = (surface === "cli"
+    ? applyDesktop(undefined, { kind: "first-party" }, { findLiveProxyImpl: async () => null, lifecycleLockDeps: { lockPath: join(root, "lifecycle.sqlite") } })
+    : lateTimeoutRequest(config, surface).then(async response => ({ status: response!.status, body: await response!.json() })))
+    .then(value => ({ value }), error => ({ error }));
+  try {
+    await Promise.race([started.promise, work.then(() => { throw new Error("apply completed before the late flight"); })]);
+    await parent!.entered; await parent!.reached; await turn();
+    time.advance(1000); await turn();
+    // The rollback has its existing admission deadline; keep the retained child held through it.
+    if (!releaseForRollback) { time.advance(1000); await turn(); }
+    const result = await work;
+    expect(rollback).toHaveBeenCalledTimes(1);
+    expect(result).not.toHaveProperty("error");
+    if (!("value" in result)) throw result.error;
+    const value = result.value;
+    if ("body" in value) {
+      expect(value.status).toBe(surface === "api" || releaseForRollback ? 409 : 500);
+      expect(value.body).toMatchObject(surface === "api"
+        ? { code: "claude_desktop_gateway_removal_failed", reason: "acl_settlement_timeout" }
+        : { code: releaseForRollback ? "native_integration_refused" : "native_integration_failed", desiredEnabled: true, reason: "write_failed" });
+      expect(JSON.stringify(value.body)).not.toContain(JSON.stringify(root).slice(1, -1));
+    } else {
+      expect(value).toMatchObject({ ok: false, reason: "gateway_profile_active:acl_settlement_timeout" });
+    }
+    const outcome = "body" in value ? value.body : value;
+    expect(JSON.stringify(outcome).includes("rollback did not complete")).toBe(!releaseForRollback);
+    const saved = JSON.parse(readFileSync(settings, "utf8"));
+    if (releaseForRollback) expect(saved).toEqual(originalSettings);
+    else {
+      expect(saved.env.KEEP).toBe("fixture");
+      expect(saved.env.HTTPS_PROXY).toBeString();
+      expect(parent!.descendants).toEqual([]);
+      time.advance(100_000); await paths.flushConfigDirHardening(root);
+      expect(windowsSecretAclReapPendingForPath(root)).toBe(true);
+    }
+    expect(inspectDesktop3pConfigLibrary({ appliedFingerprint: config.claudeCode!.desktopProfile!.appliedFingerprint }).kind).toBe("gateway_ours");
+  } finally { parent?.release(); await work; }
 });
 function holdParent(writerRoot = root) {
   const entered = deferred(), release = deferred(), reached = deferred();

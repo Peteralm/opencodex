@@ -1125,7 +1125,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           const library = inspectDesktop3pConfigLibrary({ appliedFingerprint });
           let gatewayRemoved = false;
           if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
-            const removed = await settleConfigRoot(configRoot(), () => (deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint, replaceWhileEnabled: true }));
+            let removed: ReturnType<typeof removeDesktop3pStandardPivot>;
+            try { removed = await settleConfigRoot(configRoot(), () => (deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint, replaceWhileEnabled: true })); }
+            catch (error) {
+              if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+              removed = { ok: false, changed: false, kind: "write_failed", libraryPath: library.libraryPath, reason: "acl_settlement_timeout" };
+            }
             if (!removed.ok) {
               const restored = removed.changed || !applied.changed || await rollbackDesktopFirstPartySettled(getConfigDir(), rollback);
               const modeSaved = !removed.changed || (await persistDesktopModeField(config, "first-party")).ok;

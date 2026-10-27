@@ -697,6 +697,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
     return refusal(409, "claude-desktop", "config_busy",
       "Another Claude Desktop change is already in flight. Nothing was written — try again in a moment.");
   }
+  let committedDesiredEnabled: boolean | undefined;
   claudeDesktopToggleFlight = (async (): Promise<Response> => {
     let body: { enabled?: unknown };
     try {
@@ -714,6 +715,7 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
       return refusal(persisted.retryable ? 409 : 500, "claude-desktop", persisted.retryable ? "config_busy" : "write_failed", persisted.message);
     }
     const desiredEnabled = loadConfig().clientIntegrations?.["claude-desktop"] !== false;
+    committedDesiredEnabled = desiredEnabled;
     const current = loadConfig();
     // Publish committed Desktop intent to the live config used by intercept routing.
     ctx.config.clientIntegrations = structuredClone(current.clientIntegrations);
@@ -770,7 +772,12 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
         const library = inspectDesktop3pConfigLibrary({ appliedFingerprint: fingerprint });
         let gatewayRemoved = false;
         if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
-          const removed = await settleConfigRoot(configRoot(), () => (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint, replaceWhileEnabled: true }));
+          let removed: ReturnType<typeof removeDesktop3pStandardPivot>;
+          try { removed = await settleConfigRoot(configRoot(), () => (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint, replaceWhileEnabled: true })); }
+          catch (error) {
+            if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+            removed = { ok: false, changed: false, kind: "write_failed", libraryPath: library.libraryPath, reason: "acl_settlement_timeout" };
+          }
           if (!removed.ok && !removed.changed && applied.changed && !await rollbackDesktopFirstPartySettled(getConfigDir(), rollback)) {
             return postCommitRefusal(500, "claude-desktop", "write_failed",
               "Gateway cleanup and first-party settings rollback did not complete.", { desiredEnabled });
@@ -856,6 +863,13 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
     return await claudeDesktopToggleFlight;
   } catch (error) {
     if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+    if (committedDesiredEnabled !== undefined) {
+      return postCommitRefusal(500, "claude-desktop", "write_failed",
+        "Claude Desktop intent was saved, but configuration cleanup or apply did not complete because config-directory ACL settlement timed out.",
+        { desiredEnabled: committedDesiredEnabled,
+          ...(resolveClaudeDesktopApplyMode(ctx.config, observeClaudeDesktopMode(ctx.config)) === "first-party"
+            ? { diagnostic: { stage: "ca", cause: "ETIMEDOUT" } as const } : {}) });
+    }
     if (resolveClaudeDesktopApplyMode(ctx.config, observeClaudeDesktopMode(ctx.config)) === "first-party") {
       return jsonResponse({ error: "native integration change failed", code: "native_integration_failed", clientId: "claude-desktop",
         reason: "write_failed", message: "Config-directory ACL settlement timed out. Nothing was written.",

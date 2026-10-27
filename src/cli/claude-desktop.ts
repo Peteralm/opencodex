@@ -1,4 +1,5 @@
 import { getConfigDir as configRoot, withConfigDirHardeningSettled as settleConfigRoot } from "../config/paths";
+import { WindowsSecretAclSettleTimeoutError } from "../lib/windows-secret-acl";
 import { recordCommittedDesktopGateway } from "../claude/desktop-gateway-state";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -433,7 +434,12 @@ async function applyFirstPartyDesktop(
   const appliedFingerprint = config.claudeCode?.desktopProfile?.appliedFingerprint ?? null;
   const library = inspectDesktop3pConfigLibrary({ appliedFingerprint });
   if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
-    const removed = await settleConfigRoot(configRoot(), () => removeDesktop3pStandardPivot({ appliedFingerprint, replaceWhileEnabled: true }));
+    let removed: ReturnType<typeof removeDesktop3pStandardPivot>;
+    try { removed = await settleConfigRoot(configRoot(), () => removeDesktop3pStandardPivot({ appliedFingerprint, replaceWhileEnabled: true })); }
+    catch (error) {
+      if (!(error instanceof WindowsSecretAclSettleTimeoutError)) throw error;
+      removed = { ok: false, changed: false, kind: "write_failed", libraryPath: library.libraryPath, reason: "acl_settlement_timeout" };
+    }
     if (!removed.ok) {
       const restored = removed.changed || !applied.changed || await rollbackDesktopFirstPartySettled(getConfigDir(), rollback);
       const modeSaved = !removed.changed || await settleConfigRoot(configRoot(), () => saveDesktopMode("first-party", deps));
