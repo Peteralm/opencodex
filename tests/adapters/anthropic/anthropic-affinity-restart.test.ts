@@ -85,9 +85,18 @@ test("shared-quota rejection rebinds even after a short Retry-After expires", as
   await promoteAnthropicActiveAccount(b, captureOAuthAccountSelection("anthropic"), { config, sessionKey: session });
   expect(resolveAnthropicAccountForSession(session, config).accountId).toBe(b);
 });
-test.each(["shared five-hour", "model-specific"] as const)("measured %s exhaustion commits a replacement binding", async kind => {
+test.each([
+  ["shared five-hour", false], ["model-specific", false], ["shared five-hour", true], ["model-specific", true],
+] as const)("measured %s exhaustion commits a replacement binding (earlier expired throttle: %p)", async (kind, throttled) => {
   const { a, b } = await seed();
   const model = "claude-opus-5-5";
+  if (throttled) {
+    // A short throttle that has already expired must not outrank the measured exhaustion below.
+    const start = Date.now();
+    let now = start; clock = spyOn(Date, "now").mockImplementation(() => now);
+    recordAnthropicAccount429(config, a, "0.01", now);
+    now = start + 50;
+  }
   setCachedProviderAccountQuotaForTests("anthropic", a, kind === "shared five-hour"
     ? { fiveHourPercent: 100 } : { customWindows: [{ label: "Opus", scope: "model", percent: 100 }] });
   setCachedProviderAccountQuotaForTests("anthropic", b, { fiveHourPercent: 10 });

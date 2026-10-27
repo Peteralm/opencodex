@@ -1300,8 +1300,10 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
         && !routeCandidates(eligibleAtCommit, options.routeDecision).includes(bound.accountId);
       // A transient detour must not become a rebinding just because the pause expired while
       // the alternate's credential and this commit were awaited (#7813). Shared-quota and
-      // entitlement refusals clear the binding explicitly before any alternate is committed.
+      // entitlement refusals clear the binding explicitly before any alternate is committed,
+      // and measured exhaustion of the bound account always outranks a recent throttle.
       const preservePausedAffinity = bound && bound.accountId !== accountId
+        && !(options.model && anthropicModelExhausted(bound.accountId, options.model))
         && (anthropicRatePauseUntil(bound.accountId) !== undefined || anthropicRatePausedRecently(bound.accountId)
           || anthropicFamilyRejected(bound.accountId, options.model));
       if (key && bound && (preserveExcludedAffinity || preservePausedAffinity)) sessionAffinity.set(key, { ...bound, lastUsedAt: Date.now() });
