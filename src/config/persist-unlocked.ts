@@ -100,7 +100,7 @@ export function persistConfigUnlocked(config: OcxConfig): boolean {
     if (!unchanged) {
       // Register every OS-store reference on either side before a removal can land.
       publishCredentialSync(() => atomicWriteFile(configPath, bytes, undefined, { afterRename: () => { published = true; } }),
-        { accounts: [...new Set([...osStoreAccounts(rawBeforeWrite), ...osStoreAccounts(persisted)])] });
+        { references: [...new Set([...osStoreAccounts(rawBeforeWrite), ...osStoreAccounts(persisted)])] });
       published = true;
     }
     // Publication, not successful cache refresh, is the rollback boundary. A

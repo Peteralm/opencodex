@@ -25,8 +25,18 @@ export type CredentialGeneration = {
   sequence: number;
   pending: Ticket[];
   keyAccounts: string[];
+  /**
+   * Accounts a read proved absent after a deletion. A config reference to one of them is not
+   * registered again; only a new keychain write or deletion attempt for that account clears it.
+   */
+  absentAccounts: string[];
   coverage: Coverage | null;
 };
+const MAX_ACCOUNTS = 8192;
+function accountList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_ACCOUNTS && new Set(value).size === value.length
+    && value.every(k => typeof k === "string" && k.length > 0 && k.length <= 1024);
+}
 const observers = new Map<string, () => void>();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const uuid = /^[0-9a-f-]{36}$/;
@@ -59,9 +69,9 @@ export function readCredentialGeneration(home = getConfigDir()): CredentialGener
       || !s.pending.every(t => t && typeof t.id === "string" && uuid.test(t.id)
         && Number.isSafeInteger(t.pid) && t.pid > 0)
       || new Set(s.pending.map(t => t.id)).size !== s.pending.length
-      || !Array.isArray(s.keyAccounts) || s.keyAccounts.length > 8192
-      || !s.keyAccounts.every(k => typeof k === "string" && k.length > 0 && k.length <= 1024)
-      || new Set(s.keyAccounts).size !== s.keyAccounts.length) return undefined;
+      || !accountList(s.keyAccounts)) return undefined;
+    if (s.absentAccounts === undefined) s.absentAccounts = [];
+    else if (!accountList(s.absentAccounts)) return undefined;
     if (s.coverage !== null && (!s.coverage || typeof s.coverage.owner !== "string"
       || !uuid.test(s.coverage.owner) || !Number.isSafeInteger(s.coverage.pid)
       || s.coverage.pid <= 0 || typeof s.coverage.vector !== "string"
@@ -70,7 +80,7 @@ export function readCredentialGeneration(home = getConfigDir()): CredentialGener
   } catch { return undefined; }
 }
 function empty(): CredentialGeneration {
-  return { version: 1, epoch: randomUUID(), sequence: 0, pending: [], keyAccounts: [], coverage: null };
+  return { version: 1, epoch: randomUUID(), sequence: 0, pending: [], keyAccounts: [], absentAccounts: [], coverage: null };
 }
 /** Missing metadata starts a fresh epoch; unreadable metadata is never guessed over. */
 function loadForWrite(home: string): CredentialGeneration {
@@ -86,10 +96,21 @@ function advance(state: CredentialGeneration): void {
   if (state.sequence >= Number.MAX_SAFE_INTEGER) { state.epoch = randomUUID(); state.sequence = 0; }
   else state.sequence += 1;
 }
+/**
+ * Registration. Accounts a write may hold (a keychain write or deletion attempt) always register
+ * and lose any absent marker; accounts a config merely references register unless a read already
+ * proved them absent, so a stale reference cannot bring a deleted secret back into the count.
+ */
+function register(state: CredentialGeneration, held: readonly string[], references: readonly string[]): void {
+  if ([...held, ...references].some(a => !a || a.length > 1024)) throw new Error("Invalid private key account");
+  const absent = new Set(state.absentAccounts.filter(a => !held.includes(a)));
+  state.absentAccounts = [...absent];
+  state.keyAccounts = [...new Set([...state.keyAccounts, ...held, ...references.filter(a => !absent.has(a))])];
+  if (state.keyAccounts.length > MAX_ACCOUNTS) throw new Error("Too many private key accounts");
+}
 /** Retain every OS-store account config.json references now; only a verified absence drops one. */
 function seedConfiguredAccounts(home: string, state: CredentialGeneration): void {
-  state.keyAccounts = [...new Set([...state.keyAccounts, ...configuredOsStoreAccounts(home)])];
-  if (state.keyAccounts.length > 8192) throw new Error("Too many private key accounts");
+  register(state, [], configuredOsStoreAccounts(home));
 }
 export function generationToken(state: CredentialGeneration): string {
   return `lc1:${state.epoch}:${state.sequence}`;
@@ -102,15 +123,13 @@ export function generationToken(state: CredentialGeneration): string {
  * publication before it writes. Without metadata no observer has ever attested, so a file write
  * needs no ticket; a keychain write still creates the metadata to record its account first.
  */
-function begin(home: string, accounts: readonly string[]): Ticket | null {
-  if (accounts.length === 0 && !exists(pathFor(home))) return null;
+function begin(home: string, accounts: readonly string[], references: readonly string[]): Ticket | null {
+  if (accounts.length === 0 && references.length === 0 && !exists(pathFor(home))) return null;
   const state = loadForWrite(home);
   if (state.pending.length >= 1024) throw new Error("Too many pending credential publications");
-  if (accounts.some(a => !a || a.length > 1024)) throw new Error("Invalid private key account");
   const ticket = { id: randomUUID(), pid: process.pid };
   state.pending.push(ticket);
-  state.keyAccounts = [...new Set([...state.keyAccounts, ...accounts])];
-  if (state.keyAccounts.length > 8192) throw new Error("Too many private key accounts");
+  register(state, accounts, references);
   advance(state);
   save(home, state);
   return ticket;
@@ -124,6 +143,7 @@ function finish(home: string, ticket: Ticket | null, removed: readonly string[])
       if (state.pending.some(t => t.id === ticket.id && t.pid === ticket.pid)) {
         state.pending = state.pending.filter(t => t.id !== ticket.id);
         state.keyAccounts = state.keyAccounts.filter(k => !removed.includes(k));
+        state.absentAccounts = [...new Set([...state.absentAccounts, ...removed])].slice(-MAX_ACCOUNTS);
         advance(state);
         save(home, state);
       }
@@ -133,8 +153,10 @@ function finish(home: string, ticket: Ticket | null, removed: readonly string[])
 }
 
 export interface CredentialPublication {
-  /** Private keychain accounts this write may create; they count until verified absent. */
+  /** Keychain accounts this write may create or hold; they count until verified absent. */
   accounts?: readonly string[];
+  /** Accounts the config references around this write; registered unless verified absent. */
+  references?: readonly string[];
   /** After the write settles: accounts now verified absent, dropped from the registry. */
   absent?: (completed: boolean) => readonly string[];
 }
@@ -143,7 +165,7 @@ export interface CredentialPublication {
 export function publishCredentialSync<T>(write: () => T, publication: CredentialPublication = {}): T {
   const home = getConfigDir();
   return withCredentialPublicationFence(home, () => {
-    const ticket = begin(home, publication.accounts ?? []);
+    const ticket = begin(home, publication.accounts ?? [], publication.references ?? []);
     let completed = false;
     try {
       const result = write();
@@ -160,7 +182,7 @@ export function publishCredentialSync<T>(write: () => T, publication: Credential
 export async function publishCredentialAsync<T>(write: () => Promise<T>): Promise<T> {
   const home = getConfigDir();
   return await withCredentialPublicationFenceAsync(home, async () => {
-    const ticket = begin(home, []);
+    const ticket = begin(home, [], []);
     try { return await write(); }
     finally { finish(home, ticket, []); }
   });

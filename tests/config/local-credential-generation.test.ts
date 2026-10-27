@@ -230,3 +230,67 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a publica
     expect(readFileSync(metadata).equals(before)).toBe(true);
   });
 });
+
+function memoryKeychain(initial: Record<string, string>) {
+  const store = new Map(Object.entries(initial));
+  return {
+    store,
+    factory: (_service: string, account: string) => ({
+      getPassword: () => store.get(account) ?? null,
+      setPassword: (value: string) => { store.set(account, value); },
+      deletePassword: () => store.delete(account),
+    }),
+  };
+}
+
+test("restoring a keychain key to plaintext and then removing the plaintext returns the count to zero", async () => {
+  await withLocalCredentialFixture(async f => {
+    const keys = await import("../../src/providers/api-key-resolve");
+    const { restoreProviderKeyFromKeychain } = await import("../../src/providers/key-store");
+    const { getDefaultConfig, saveConfigPreservingClaudeCode } = await import("../../src/config");
+    const keychain = memoryKeychain({ openai: "fixture-restored-secret" });
+    keys.setProviderKeychainEntryFactoryForTests(keychain.factory);
+    try {
+      const config = getDefaultConfig();
+      const provider = config.providers.openai;
+      if (!provider) throw new Error("Default config fixture requires the openai provider");
+      provider.apiKey = "keychain:openai";
+      f.put(join(f.home, "config.json"), config);
+      f.start();
+      expect((await f.inventory.collectLocalCredentials())?.count).toBe(1);
+      expect(restoreProviderKeyFromKeychain(config, "openai")).toEqual({ ok: true, restored: 1 });
+      expect(keychain.store.size).toBe(0);
+      expect((await f.inventory.collectLocalCredentials())?.count).toBe(1);
+      delete provider.apiKey;
+      saveConfigPreservingClaudeCode(config);
+      expect((await f.inventory.collectLocalCredentials())?.count).toBe(0);
+    } finally { keys.setProviderKeychainEntryFactoryForTests(null); }
+  });
+});
+
+for (const observedFirst of [true, false]) {
+  test(`a keychain secret deleted while its reference is still saved stops counting once the reference goes (${observedFirst ? "observer running" : "no observer yet"})`, async () => {
+    await withLocalCredentialFixture(async f => {
+      const keys = await import("../../src/providers/api-key-resolve");
+      const { getDefaultConfig, saveConfigPreservingClaudeCode } = await import("../../src/config");
+      const keychain = memoryKeychain({ openai: "fixture-secret" });
+      keys.setProviderKeychainEntryFactoryForTests(keychain.factory);
+      try {
+        const config = getDefaultConfig();
+        const provider = config.providers.openai;
+        if (!provider) throw new Error("Default config fixture requires the openai provider");
+        provider.apiKey = "keychain:openai";
+        f.put(join(f.home, "config.json"), config);
+        if (observedFirst) f.start();
+        expect(keys.providerKeychainEntry("openai").deletePassword()).toBe(true);
+        expect(keychain.store.size).toBe(0);
+        // The saved reference still occupies a slot until it is removed.
+        if (observedFirst) expect((await f.inventory.collectLocalCredentials())?.count).toBe(1);
+        delete provider.apiKey;
+        saveConfigPreservingClaudeCode(config);
+        if (!observedFirst) f.start();
+        expect((await f.inventory.collectLocalCredentials())?.count).toBe(0);
+      } finally { keys.setProviderKeychainEntryFactoryForTests(null); }
+    });
+  });
+}
