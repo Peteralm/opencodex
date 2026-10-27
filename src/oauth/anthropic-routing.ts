@@ -360,7 +360,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   const PROVIDER = instance;
   const poolKey = anthropicPoolKey(instance);
   const { anthropicFamilyRejected, anthropicFamilyRetryAt, anthropicFamilyHoldState, anthropicModelExhausted, clearAnthropicFamilyQuota } = anthropicModelQuotaFor(instance);
-  const { anthropicRatePauseUntil, clearAnthropicRatePauses, pauseAnthropicRateAdmission } = anthropicRatePolicyFor(instance);
+  const { anthropicRatePauseUntil, anthropicRatePausedRecently, clearAnthropicRatePauses, pauseAnthropicRateAdmission } = anthropicRatePolicyFor(instance);
   const { anthropicCooldownGeneration, clearAnthropicCooldownGenerations, noteAnthropicCooldownMutation } = anthropicCooldownRecoveryFor(instance);
   // Request-owned config authorizes selection/commit. Namespace-only credential and roster
   // methods carry no ambient disk authority; physical consumers recheck their captured config/target.
@@ -1307,11 +1307,18 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
       }
       const key = affinityKey(options.sessionKey);
       const bound = key ? sessionAffinity.get(key) : undefined;
-      // A temporary alternate is never evidence against an established account. Shared
-      // quota/entitlement refusals and operator resets explicitly remove the binding.
-      const preserveBinding = bound && Date.now() - bound.lastUsedAt <= AFFINITY_IDLE_TTL_MS
-        && !isCooled(bound.accountId, Date.now()) && isPoolCredentialUsable(bound.accountId, Date.now());
-      if (preserveBinding) sessionAffinity.set(key, { ...bound, lastUsedAt: Date.now() });
+      const eligibleAtCommit = options.routeDecision && bound ? getEligibleAnthropicAccounts() : [];
+      const preserveExcludedAffinity = options.routeDecision && bound && bound.accountId !== accountId
+        && Date.now() - bound.lastUsedAt <= AFFINITY_IDLE_TTL_MS
+        && eligibleAtCommit.includes(bound.accountId)
+        && !routeCandidates(eligibleAtCommit, options.routeDecision).includes(bound.accountId);
+      // A transient detour must not become a rebinding just because the pause expired while
+      // the alternate's credential and this commit were awaited (#7813). Shared-quota and
+      // entitlement refusals clear the binding explicitly before any alternate is committed.
+      const preservePausedAffinity = bound && bound.accountId !== accountId
+        && (anthropicRatePauseUntil(bound.accountId) !== undefined || anthropicRatePausedRecently(bound.accountId)
+          || anthropicFamilyRejected(bound.accountId, options.model));
+      if (key && bound && (preserveExcludedAffinity || preservePausedAffinity)) sessionAffinity.set(key, { ...bound, lastUsedAt: Date.now() });
       else bindAnthropicSessionAffinity(options.sessionKey, accountId);
     }
     if (manualPreference === undefined || (manualPreference?.accountId === expectedSelection.accountId
