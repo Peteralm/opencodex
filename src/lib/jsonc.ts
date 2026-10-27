@@ -18,7 +18,7 @@ function stripJsonComments(text: string): string {
     const ch = text[i]!;
     const next = text[i + 1];
     if (inLine) {
-      if (ch === "\n") {
+      if (ch === "\n" || ch === "\r") {
         inLine = false;
         out += ch;
       }
