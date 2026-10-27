@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { ptr, toArrayBuffer } from "bun:ffi";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectDesktopRecovery, parseRecoveryAnswer, recoveryHomeIdentity,
   type DesktopRecoveryIo } from "../../src/service/desktop-recovery";
-import { linuxRecoveryBirth, linuxRecoveryListeners, linuxRecoverySocket, macRecoveryRequirement,
+import { linuxRecoveryBirth, linuxRecoveryListeners, linuxRecoverySocket, macRecoveryPaths, macRecoveryRequirement,
   parseMacRecoveryPath, recoveryImageCandidate, recoverySibling, verifyMacRecoveryImage } from "../../src/service/desktop-recovery-process";
 import { repoPath } from "../helpers/repo-root";
 
@@ -25,6 +26,24 @@ function fixture(changes: Partial<DesktopRecoveryIo> = {}): DesktopRecoveryIo & 
     open: async () => ({ connection: { serverPort: endpoint.port, clientPort: 54321 },
       ask: async nonce => { calls.push(nonce); return response(nonce); }, close: () => { calls.push("closed"); } }),
     owner: () => { calls.push("owner"); return "socket-inode"; }, ...changes,
+  };
+}
+
+function macPathLibrary(path: string | null = null) {
+  // A delayed errno read need not retain the failed call's ESRCH. This valid pointer models
+  // that observation; it does not claim to reproduce native macOS FFI behavior on other hosts.
+  const delayedErrno = new Int32Array([0]);
+  const calls: number[] = [];
+  return {
+    calls, closes: 0,
+    symbols: {
+      proc_pidpath(pid: number, buffer: ReturnType<typeof ptr>, length: number) {
+        calls.push(pid);
+        return path === null ? 0 : new TextEncoder().encodeInto(path, new Uint8Array(toArrayBuffer(buffer, 0, length))).written;
+      },
+      __error: () => ptr(delayedErrno),
+    },
+    close() { this.closes++; },
   };
 }
 
@@ -172,6 +191,79 @@ describe("native Desktop recovery evidence", () => {
     const io = fixture({ open: async () => ({ connection: { serverPort: 1, clientPort: 2 },
       ask: async request => response(request).replace(instance, ++answers === 1 ? instance : "e".repeat(32)), close() {} }) });
     return expect(inspectDesktopRecovery(io)).resolves.toEqual({ kind: "unknown" });
+  });
+
+  test("macOS failed kernel path skips a real reaped process despite unavailable delayed errno", async () => {
+    const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"], {
+      stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 1_000, killSignal: "SIGKILL",
+    });
+    const library = macPathLibrary(), paths = macRecoveryPaths(library);
+    try {
+      expect(await child.exited).toBe(0);
+      expect(paths.read(child.pid)).toBeNull();
+      const io = fixture({ processes: () => paths.read(child.pid) === null ? [] : [native] });
+      expect(await inspectDesktopRecovery(io)).toEqual({ kind: "none" });
+      expect(io.calls).toEqual([]);
+      expect(library.calls).toEqual([child.pid, child.pid]);
+    } finally {
+      paths.close();
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+    }
+    expect(library.closes).toBe(1);
+  });
+
+  test("macOS failed kernel path stays unknown for a real live process", async () => {
+    const library = macPathLibrary(), paths = macRecoveryPaths(library);
+    try {
+      expect(() => paths.read(process.pid)).toThrow("kernel image path unavailable");
+      const io = fixture({ processes: () => paths.read(process.pid) === null ? [] : [native] });
+      expect(await inspectDesktopRecovery(io)).toEqual({ kind: "unknown" });
+      expect(io.calls).toEqual([]);
+    } finally { paths.close(); }
+    expect(library.closes).toBe(1);
+  });
+
+  test.each(["EPERM", "EACCES", "ENOSYS", undefined])("macOS failed kernel path keeps probe error %s unknown", async code => {
+    const library = macPathLibrary(), probes: [number, number][] = [];
+    const paths = macRecoveryPaths(library, (pid, signal) => {
+      probes.push([pid, signal]);
+      throw Object.assign(new Error("process observation unavailable"), { code });
+    });
+    try {
+      const io = fixture({ processes: () => paths.read(native.pid) === null ? [] : [native] });
+      expect(await inspectDesktopRecovery(io)).toEqual({ kind: "unknown" });
+      expect(io.calls).toEqual([]);
+      expect(probes).toEqual([[native.pid, 0]]);
+    } finally { paths.close(); }
+    expect(library.closes).toBe(1);
+  });
+
+  test("macOS successful kernel path is parsed without probing process liveness", () => {
+    const path = "/Applications/OpenCodex.app/Contents/MacOS/opencodex-desktop";
+    const library = macPathLibrary(path);
+    let probes = 0;
+    const paths = macRecoveryPaths(library, () => { probes++; throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+    try {
+      expect(paths.read(native.pid)).toBe(path);
+      expect(library.calls).toEqual([native.pid]);
+      expect(probes).toBe(0);
+    } finally { paths.close(); }
+    expect(library.closes).toBe(1);
+  });
+
+  test("macOS kernel path rejects invalid PIDs before native calls or process-group probes", () => {
+    const library = macPathLibrary();
+    let probes = 0;
+    const paths = macRecoveryPaths(library, () => { probes++; });
+    try {
+      for (const pid of [0, -1, 1.5, NaN, Infinity, 0x80000000, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => paths.read(pid)).toThrow("unverified process PID");
+      }
+      expect(library.calls).toEqual([]);
+      expect(probes).toBe(0);
+    } finally { paths.close(); }
+    expect(library.closes).toBe(1);
   });
 
   test("macOS kernel paths are bounded and dynamic validation requires the selected code hashes", () => {

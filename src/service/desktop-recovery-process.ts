@@ -1,5 +1,5 @@
 /** OS evidence for native recovery. Names and discovery records never select a trusted image. */
-import { dlopen, ptr, read } from "bun:ffi";
+import { dlopen, ptr } from "bun:ffi";
 import { spawnSync } from "node:child_process";
 import { accessSync, constants, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, posix, win32 } from "node:path";
@@ -60,18 +60,30 @@ export function parseMacRecoveryPath(bytes: Uint8Array, length: number): string 
   return path;
 }
 
-function macRecoveryPaths() {
-  const library = dlopen("/usr/lib/libproc.dylib", {
+interface MacRecoveryLibrary {
+  symbols: {
+    proc_pidpath(pid: number, buffer: ReturnType<typeof ptr>, length: number): number;
+  };
+  close(): void;
+}
+
+/** Kernel path reads and process probes are separate observations, never name-based evidence. */
+export function macRecoveryPaths(
+  library: MacRecoveryLibrary = dlopen("/usr/lib/libproc.dylib", {
     proc_pidpath: { args: ["i32", "ptr", "u32"], returns: "i32" },
-    __error: { args: [], returns: "ptr" },
-  });
+  }),
+  probe: (pid: number, signal: 0) => unknown = process.kill,
+) {
   return {
     read(pid: number): string | null {
+      if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fffffff) throw new Error("unverified process PID");
       const buffer = new Uint8Array(4096);
       const count = library.symbols.proc_pidpath(pid, ptr(buffer), buffer.length);
       if (count <= 0) {
-        const errno = library.symbols.__error();
-        if (errno && read.i32(errno) === 3) return null; // ESRCH: the enumerated process exited.
+        // Do not recover an earlier errno through a second FFI call. Only a fresh ESRCH
+        // proves that the enumerated PID is gone; alive or inaccessible remains unknown.
+        try { probe(pid, 0); }
+        catch (error) { if ((error as NodeJS.ErrnoException | null)?.code === "ESRCH") return null; }
         throw new Error("kernel image path unavailable");
       }
       return parseMacRecoveryPath(buffer, count);

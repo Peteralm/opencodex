@@ -2,7 +2,8 @@
 
 `src/cli/ensure-desktop-cold-start.ts` preserves a verified native Desktop recovery while its
 proxy child is absent, independently of durable service ownership. The native producer lives
-in `desktop/src-tauri/src/recovery.rs` and `desktop/src-tauri/src/recovery_presence.rs`.
+in `desktop/src-tauri/src/recovery.rs` and `desktop/src-tauri/src/recovery_presence.rs`;
+`desktop/src-tauri/src/recovery_activity.rs` tracks its actual startup and supervision activity.
 The consumer is `src/service/desktop-recovery.ts`; `src/service/desktop-recovery-process.ts`
 owns the executable and OS process/connection observations. This is an early startup guard,
 not a new service owner, account credential or authority to stop another process.
@@ -14,8 +15,19 @@ window and before its first startup run. Its instance identifier is random for t
 The resolved configuration home comes only from the bundled CLI's normal resolve answer.
 After successful `recovery::register`, the producer reports `unknown` before resolution, never absence.
 Registration failure installs no `Recovery` and grants no recovery authority. The listener survives
-child exit and restart backoff. Each response reads the current exit coordinator: Stop, Quit and
-update drain revoke recovery immediately, without waiting for a file update or heartbeat.
+child exit and restart backoff. After home resolution, recovery credit requires a current startup
+run, confirmed ownership of the attached runtime, or an actual supervisor recovery reservation.
+Generic `wanted` intent alone is insufficient: a failed ordinary launch waiting for the person's
+retry and an attached guest without a recovery reservation do not claim to be recovering.
+The existing watchdog can later schedule recovery for a guest; attachment itself is not a schedule.
+Activity follows the startup generation, and reservations survive the handoff from backoff into
+the next run. Scheduling acquires its reservation under the supervisor lock before publishing
+`pending`, so a competing completion cannot expose a reservation-free scheduled retry. Failed
+recovery and deferred owned-child exits retain credit until their follow-up decision; a held or
+cancelled retry releases it when no other work remains. A stale completion cannot clear a newer
+run's activity. Each response also reads the
+current exit coordinator: Stop, Quit and update drain revoke recovery immediately, without waiting
+for a file update or heartbeat.
 
 The producer writes no discovery file. The consumer discovers the independently identified
 process's actual IPv4 loopback listening sockets through the OS; files cannot nominate a port,
@@ -36,7 +48,11 @@ compares the running CLI's kernel image with its file. macOS requires the matchi
 identifier, a valid complete bundle seal and dynamic checks requiring the selected CLI/native
 executable's exact CDHash. The kernel's `proc_pidpath` selects native candidates; `ps` supplies
 only same-user PIDs and birth times, because its `comm` field can be argv[0]. Both architecture
-slices of a universal binary are supported. The fixed libproc handle is closed after each scan.
+slices of a universal binary are supported. A failed kernel path read skips a PID only when a
+separate signal-zero observation positively reports `ESRCH`. A live process, denied access or any
+other observation failure remains unavailable evidence; a later FFI call does not recover the
+path call's errno. PIDs must be positive signed 32-bit integers before either native observation.
+The fixed libproc handle is closed after each scan.
 Windows path and file-signature checks cannot establish the live mapped image's identity, so
 an independently selected running sibling remains unknown and cannot earn recovery credit.
 An npm/source CLI can additionally use the canonical Debian installation under `/usr/bin` only
@@ -84,4 +100,5 @@ Explicit `ocx start` and the existing consented service installation flow remain
 compiled CLI/native producer pair, including a protocol-speaking unrelated installation.
 `tests/cli/cli-ensure-desktop-cold-start.test.ts` covers the resulting wait/refuse/CLI decisions.
 `tests/clients/desktop-startup-surface.test.ts` binds producer registration and home selection to
-the native startup entrypoint. Native protocol tests also run in the Rust module's test suite.
+the native startup entrypoint. Native protocol and activity-transition tests also run in the Rust
+modules' test suites.

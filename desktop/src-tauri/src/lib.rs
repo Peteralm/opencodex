@@ -49,6 +49,7 @@ mod popup_portable_test;
 mod process_spawn;
 mod proxy;
 mod recovery;
+mod recovery_activity;
 mod recovery_presence;
 mod resolve;
 mod runtime_stop;
