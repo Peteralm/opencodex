@@ -159,4 +159,4 @@ OpenCodex가 `web_search` 가로채기를 멈추고 Codex 통합이 `~/.codex/co
 fingerprint 선례를 따르지만, 실제 계정과 작업량으로 충분히 soak test하는 편이 좋습니다. 전체
 필드는 [설정 레퍼런스](/ko/reference/configuration/server/#sidecars)를 참고하세요.
 
-검색 답변의 Sources 목록 뒤에 URL 없는 글머리표가 있으면 출처로 삭제하지 않고 답변에 남깁니다.
+검색 답변의 Sources 목록에 URL 없는 글머리표가 있으면 출처로 삭제하지 않고 답변에 남깁니다. `mode:fast`처럼 인라인 코드 안의 텍스트는 링크로 오인하지 않습니다.

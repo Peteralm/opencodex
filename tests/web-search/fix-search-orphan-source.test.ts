@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseSidecarSSE } from "../../src/web-search/parse";
 
+/** Parse `text` as the only output text of a completed sidecar stream. */
 async function parse(text: string) {
   return parseSidecarSSE(new Response(`data: ${JSON.stringify({ type: "response.completed", response: {
     output: [{ type: "message", content: [{ type: "output_text", text }] }],
@@ -12,14 +13,31 @@ describe("search source-list text ownership", () => {
     expect(result.text).toBe("Answer\n\n- Remember this conclusion");
     expect(result.sources).toEqual([{ url: "https://example.com" }]);
   });
-  test("does not swallow consecutive unmatched bullets before another URL", async () => {
+  test("keeps the first of consecutive unmatched bullets before another URL", async () => {
     const result = await parse("Answer\nSources:\n- https://example.com\n- First note\n- Second note\nhttps://example.org");
-    expect(result.text).toContain("- First note\n- Second note\nhttps://example.org");
-    expect(result.sources).toHaveLength(1);
+    expect(result.text).toBe("Answer\n\n- First note");
+    expect(result.sources).toEqual([{ url: "https://example.com" }, { title: "Second note", url: "https://example.org" }]);
   });
   test("preserves a pending note when the next citation has its own title", async () => {
     const result = await parse("Answer\nSources:\n- https://example.com\n- Keep this note\n- Another source: https://example.org");
-    expect(result.text).toBe("Answer\n\n- Keep this note\n- Another source: https://example.org");
+    expect(result.text).toBe("Answer\n\n- Keep this note");
+    expect(result.sources).toEqual([{ url: "https://example.com" }, { title: "Another source", url: "https://example.org" }]);
+  });
+  test("keeps a note but not a rejected self-titled credential URL", async () => {
+    const result = await parse("Answer\nSources:\n- https://example.com\n- Keep this note\n- Token: https://user:secret@private.test/x");
+    expect(result.text).toBe("Answer\n\n- Keep this note");
+    expect(result.text).not.toContain("secret");
+    expect(result.sources).toEqual([{ url: "https://example.com" }]);
+  });
+  test("keeps a note but not a rejected credential URL after consecutive notes", async () => {
+    const result = await parse("Answer\nSources:\n- https://example.com\n- First note\n- Second note\nhttps://user:secret@private.test");
+    expect(result.text).toBe("Answer\n\n- First note");
+    expect(result.text).not.toContain("secret");
+    expect(result.sources).toEqual([{ url: "https://example.com" }]);
+  });
+  test("treats URI-like text inside inline code as a note", async () => {
+    const result = await parse("Answer\nSources:\n- https://example.com\n- Set `mode:fast` before retrying");
+    expect(result.text).toBe("Answer\n\n- Set `mode:fast` before retrying");
     expect(result.sources).toEqual([{ url: "https://example.com" }]);
   });
   test("still consumes a title followed immediately by its URL", async () => {

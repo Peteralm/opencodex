@@ -124,6 +124,11 @@ function cleanTitle(prefix: string): string {
   return title;
 }
 
+/**
+ * Move citation lines from the last `Sources:` block into `sources` and strip them from the text.
+ * List items that cannot be paired with a URL stay in the answer, and every consumed citation line,
+ * including one whose URL is rejected as unsafe, leaves the text.
+ */
 function extractTrailingSources(text: string): { text: string; sources: WebSearchSource[]; stripped: boolean } {
   const lines = text.split("\n");
   // Find the LAST line that is a "Sources:" header (markdown prefixes allowed).
@@ -139,6 +144,9 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
   let lastConsumed = headerIdx;
   // A title line whose URL is expected on a following line (multiline entry).
   let pendingTitle: string | null = null;
+  let pendingIndex = -1;
+  // Line indexes of list items that turned out not to title a URL; they remain answer text.
+  const keptNotes: number[] = [];
   let consumedSourceLine = false;
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const raw = lines[i].trim();
@@ -148,12 +156,17 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
       continue;
     }
     const httpMatch = raw.match(URL_RE);
-    const m = httpMatch ?? raw.match(URI_LIKE_RE);
+    // URI-like text inside inline code, such as `mode:fast`, is prose rather than a citation.
+    const m = httpMatch ?? raw.replace(/`[^`]*`/g, span => " ".repeat(span.length)).match(URI_LIKE_RE);
     if (!m) {
       // A list-ish line with no URL may be a title whose URL is on the next line. Only treat it as a
-      // pending title when it looks like a list item; otherwise it's prose → stop.
-      if (pendingTitle === null && /^[-*>\d.)]/.test(raw)) { pendingTitle = raw; continue; }
-      break;
+      // pending title when it looks like a list item; otherwise it's prose → stop. A second list item
+      // means the previous one was a note, so it is kept instead of discarded.
+      if (!/^[-*>\d.)]/.test(raw)) break;
+      if (pendingTitle !== null) keptNotes.push(pendingIndex);
+      pendingTitle = raw;
+      pendingIndex = i;
+      continue;
     }
     // A non-HTTP URI embedded in prose is not sufficient to classify the line as a citation.
     // Accept it as a consumed source line only when it is a list item or the whole line starts with
@@ -164,7 +177,7 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     const inlinePrefix = raw.slice(0, m.index);
     const inlineTitle = cleanTitle(inlinePrefix);
     // A self-titled citation does not prove that the preceding bullet was its title.
-    if (pendingTitle !== null && inlineTitle) break;
+    if (pendingTitle !== null && inlineTitle) keptNotes.push(pendingIndex);
     consumedSourceLine = true;
     lastConsumed = i;
     // Title: text before the URL on this line, else a buffered title from a preceding line.
@@ -174,9 +187,10 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     if (appendSafeWebSearchSource(sources, title ? { url, title } : { url })) seen.add(url);
   }
   if (!consumedSourceLine) return { text, sources: [], stripped: false };
-  // Keep text before the header AND any prose after the consumed source lines.
+  // Keep text before the header, notes found between citations, and anything after the last citation.
   const before = lines.slice(0, headerIdx).join("\n").replace(/\s+$/, "");
-  const after = lines.slice(lastConsumed + 1).join("\n").replace(/^\s+/, "");
+  const notes = keptNotes.filter(index => index < lastConsumed).map(index => lines[index]);
+  const after = [...notes, lines.slice(lastConsumed + 1).join("\n").replace(/^\s+/, "")].filter(Boolean).join("\n");
   const body = after ? (before ? `${before}\n\n${after}` : after) : before;
   return { text: body, sources, stripped: true };
 }
