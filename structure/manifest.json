@@ -927,6 +927,8 @@
         "desktop/src-tauri/src/recovery.rs",
         "desktop/src-tauri/src/recovery_activity.rs",
         "desktop/src-tauri/src/recovery_presence.rs",
+        "desktop/src-tauri/src/startup.rs",
+        "desktop/src-tauri/src/supervisor.rs",
         "src/service/desktop-recovery.ts",
         "src/service/desktop-recovery-process.ts",
         "src/cli/ensure-desktop-cold-start.ts"

@@ -20,7 +20,8 @@ run, confirmed ownership of the attached runtime, or an actual supervisor recove
 Generic `wanted` intent alone is insufficient: a failed ordinary launch waiting for the person's
 retry and an attached guest without a recovery reservation do not claim to be recovering.
 The existing watchdog can later schedule recovery for a guest; attachment itself is not a schedule.
-Activity follows the startup generation, and reservations survive the handoff from backoff into
+Activity follows the startup generation that `desktop/src-tauri/src/startup.rs` assigns, and the
+reservations `desktop/src-tauri/src/supervisor.rs` takes survive the handoff from backoff into
 the next run. Scheduling acquires its reservation under the supervisor lock before publishing
 `pending`, so a competing completion cannot expose a reservation-free scheduled retry. Failed
 recovery and deferred owned-child exits retain credit until their follow-up decision; a held or
