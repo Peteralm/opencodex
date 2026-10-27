@@ -1,5 +1,7 @@
 {
   "fix-jsonc-cr-comments.test.ts": "lib",
+  "fix-jsonc-empty-comma.test.ts": "lib",
+
   "claude-intercept-acl-barrier.test.ts": "claude-integration",
   "agent-clients.test.ts": "clients",
   "workbuddy-selector-recovery.test.ts": "clients",

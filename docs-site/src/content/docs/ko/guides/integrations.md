@@ -249,6 +249,8 @@ OpenCodex는 이 후보 파일을 JSONC로 읽습니다. `//` 한 줄 주석은 
 
 루프백에서는 `options.apiKey`로 `{env:OPENCODEX_KILO_API_KEY}`를 사용합니다. 루프백이 아닌 바인드에서는 인증을 `options.headers["x-opencodex-api-key"]`로 옮기며 실제 키를 저장하지 않습니다. 적용 시 전역 파일 전체를 보기 좋은 JSON으로 다시 쓰므로 다른 키의 주석과 후행 쉼표는 보존되지 않습니다. Kilo는 자동 카탈로그 갱신 대상입니다. `ocx sync`, `POST /api/sync`, 표시 여부·프로바이더·프리셋 변경은 다른 클라이언트와 같은 소유 블록만 갱신하는 안전한 규칙으로 소유한 Kilo 블록을 갱신하며, 새 Kilo 세션이 갱신된 파일을 읽습니다.
 
+후보 파일을 읽을 때 배열 요소나 객체 속성 뒤의 후행 쉼표는 허용합니다. 빈 배열과 객체는 `[]`, `{}`로 작성하세요. `[,]`, `{,}`는 잘못된 형식으로 거부합니다.
+
 ```bash
 ocx integration client enable --client kilo
 ocx export --client kilo --out ./kilo.jsonc

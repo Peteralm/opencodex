@@ -930,6 +930,9 @@ sync`, `POST /api/sync`, and visibility, provider, or preset changes refresh an 
 block under the same safe owned-only rules as every other client, and a new Kilo session
 loads the updated file.
 
+When reading these candidate files, OpenCodex accepts a trailing comma after an array element or
+object property. Write an empty array or object as `[]` or `{}`; `[,]` and `{,}` are refused as malformed.
+
 ```bash
 ocx integration client enable --client kilo
 ocx export --client kilo --out ./kilo.jsonc
