@@ -54,6 +54,7 @@ import type { FastPolicyAuthority } from "../../providers/fastwire";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../../providers/registry";
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
 import { recordAntigravityAccountRoster } from "../../providers/antigravity-account-roster";
+import { discoverAntigravitySiblings } from "./antigravity-discovery";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { effectiveModelAliases } from "../../providers/default-aliases";
@@ -790,7 +791,16 @@ export async function fetchProviderModelsWithAuth(
       return observed(models, "degraded");
     }
     if (antigravity) {
-      const upstream: CatalogModel[] = antigravity.map(model => ({
+      if (getConfigDir() !== metadataConfigDir) return observed(withConfiguredRetention(configured), "degraded");
+      const admitSiblings = resolveAuth.kind === "refreshing" && name === "google-antigravity"
+        && prov.authMode === "oauth" && auth.oauthAccountId
+        ? await discoverAntigravitySiblings(name, prov, auth.oauthAccountId, request, discovery.maxResponseBytes, discovery.maxModels, metadataConfigDir)
+        : () => [];
+      if (!isCurrentCacheGeneration() || getConfigDir() !== metadataConfigDir) return observed(withConfiguredRetention(configured), "degraded");
+      const byId = new Map(antigravity.map(model => [model.id, model]));
+      for (const model of admitSiblings()) if (!byId.has(model.id)) byId.set(model.id, model);
+      const merged = [...byId.values()];
+      const upstream: CatalogModel[] = merged.map(model => ({
         id: model.id,
         provider: name,
         // Only an exact discovered wire map proves a new model's selectable effort ladder.
@@ -810,7 +820,7 @@ export async function fetchProviderModelsWithAuth(
       }
       // Save exact family routes before publishing synthetic IDs. These synchronous writes
       // cannot interleave with a credential-generation change; failure keeps the prior cache.
-      registerAntigravityDiscoveredWireModels(prov.baseUrl, antigravity, {
+      registerAntigravityDiscoveredWireModels(prov.baseUrl, merged, {
         provider: name,
         cacheGeneration,
       });
