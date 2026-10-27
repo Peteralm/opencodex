@@ -139,3 +139,37 @@ test("external source changes and observer loss withhold attestation until expli
     expect(await f.inventory.collectLocalCredentials()).toBeUndefined();
   });
 });
+
+test("status never attests a snapshot that raced an OAuth publication, even while another process holds the config lock", async () => {
+  await withLocalCredentialFixture(async f => {
+    f.start();
+    const before = await f.inventory.collectLocalCredentials();
+    expect(before?.count).toBe(0);
+    // The config mutation lock held elsewhere once made the publication ticket silently disappear.
+    const holder = Bun.spawn([process.execPath, "-e", `const { Database } = require("bun:sqlite"); const db = new Database(${JSON.stringify(join(f.home, "config-mutation.sqlite"))}, { create: true }); db.exec("BEGIN IMMEDIATE"); console.log("held"); await Bun.stdin.text();`],
+      { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+    try {
+      const reader = holder.stdout.getReader();
+      let seen = "";
+      while (!seen.includes("held")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("config lock holder exited early");
+        seen += new TextDecoder().decode(value);
+      }
+      reader.releaseLock();
+      const { saveCredential } = await import("../../src/oauth/store");
+      let racing: ReturnType<typeof f.inventory.collectLocalCredentials> | undefined;
+      // Start a status read in the middle of the publication, before the OAuth store is written.
+      await f.publication.publishCredentialAsync(async () => {
+        racing = f.inventory.collectLocalCredentials();
+        await saveCredential("fixture-oauth", { access: "fixture-access", refresh: "fixture-refresh", expires: 1 });
+      });
+      const result = await racing;
+      expect(result?.count).toBe(1);
+      expect(result?.generation).not.toBe(before?.generation);
+    } finally {
+      holder.stdin.end();
+      await holder.exited;
+    }
+  });
+});

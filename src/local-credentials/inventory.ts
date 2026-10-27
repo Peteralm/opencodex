@@ -1,6 +1,7 @@
 import { watch, lstatSync, readdirSync, type FSWatcher } from "node:fs";
 import { dirname, join, resolve, parse } from "node:path";
 import { getConfigDir } from "../config/paths";
+import { readUnderCredentialPublicationFence } from "./publication-fence";
 import { getCodexHome } from "../codex/paths";
 import { readBounded, nativeProfileHomeId, countLocalNativeProfileSlots } from "../codex/native-profile-store";
 import { countLocalOAuthCredentialSlots } from "../oauth/store";
@@ -20,6 +21,8 @@ import {
 export type LocalCredentialSnapshot = { count: number; generation: string };
 const RECONCILE_RETRIES = 20;
 const RECONCILE_RETRY_MS = 100;
+const FENCED_READ_ATTEMPTS = 40;
+const FENCED_READ_RETRY_MS = 50;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const MAX_BYTES = 4 * 1024 * 1024;
 function object(value: unknown): Record<string, unknown> {
@@ -171,9 +174,8 @@ export function scanLocalCredentials(accounts: readonly string[] = []): { count:
   if (!Number.isSafeInteger(count) || count < 0) throw new Error("Invalid credential count");
   return { count, vector: JSON.stringify(vector.sort()), targets: [...targets].sort() };
 }
-export async function collectLocalCredentials(): Promise<LocalCredentialSnapshot | undefined> {
+function snapshotOnce(home: string): LocalCredentialSnapshot | undefined {
   try {
-    const home = getConfigDir();
     const before = readCredentialGeneration(home);
     if (!before?.coverage || before.pending.length || !observationAlive(before, home)) return undefined;
     const snapshot = scanLocalCredentials(before.keyAccounts);
@@ -184,6 +186,22 @@ export async function collectLocalCredentials(): Promise<LocalCredentialSnapshot
       || before.coverage.vector !== snapshot.vector || after.coverage.vector !== snapshot.vector) return undefined;
     return { count: snapshot.count, generation: generationToken(after) };
   } catch { return undefined; }
+}
+
+/**
+ * The attestation for "ocx status --json". Each attempt holds the publication fence shared across
+ * both generation reads and the scan, so no instrumented write can land in between; while a
+ * publication holds it, retry briefly, then omit rather than attest a snapshot that could race.
+ */
+export async function collectLocalCredentials(): Promise<LocalCredentialSnapshot | undefined> {
+  const home = getConfigDir();
+  for (let attempt = 0; attempt < FENCED_READ_ATTEMPTS; attempt += 1) {
+    const read = readUnderCredentialPublicationFence(home, () => snapshotOnce(home));
+    if (read.kind === "read") return read.value;
+    if (read.kind === "unavailable") return undefined;
+    await new Promise(resolve => setTimeout(resolve, FENCED_READ_RETRY_MS));
+  }
+  return undefined;
 }
 export function startLocalCredentialObservation(): { stop(): void; reconcile(): void } {
   const home = getConfigDir();

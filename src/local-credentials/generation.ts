@@ -3,7 +3,7 @@ import { lstatSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config/paths";
 import { atomicWriteFileStreamed } from "../config/atomic-write";
-import { ConfigMutationLockError, withConfigMutationLockSync } from "../config/mutation-lock";
+import { withCredentialPublicationFence, withCredentialPublicationFenceAsync } from "./publication-fence";
 import { readBoundedRegularFileSync } from "../lib/bounded-file-read";
 import { acquireCredentialObservationLease, credentialObservationLeaseAlive, sweepDeadCredentialObservationLeases } from "./observation-lease";
 
@@ -29,7 +29,6 @@ export type CredentialGeneration = {
 const observers = new Map<string, () => void>();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const uuid = /^[0-9a-f-]{36}$/;
-const LOCK_ATTEMPTS = 40;
 const pathFor = (home: string) => join(home, "local-credentials.json");
 
 export function observationAlive(state: CredentialGeneration, home = getConfigDir()): boolean {
@@ -90,28 +89,15 @@ export function generationToken(state: CredentialGeneration): string {
   return `lc1:${state.epoch}:${state.sequence}`;
 }
 /**
- * The config lock never waits (busy_timeout=0). Writers that must not lose a ticket retry briefly
- * and synchronously; work that can be skipped or retried later takes one attempt.
- */
-function locked<T>(home: string, fn: () => T, attempts = LOCK_ATTEMPTS): T {
-  for (let attempt = 1; ; attempt++) {
-    try { return withConfigMutationLockSync(fn, home); }
-    catch (error) {
-      if (attempt >= attempts || !(error instanceof ConfigMutationLockError)) throw error;
-      Bun.sleepSync(25);
-    }
-  }
-}
-
-/**
- * Publishes a ticket before credential bytes change. A file publication without one is still
- * fenced, because the observer's identity vector no longer matches until it reconciles; so a
- * file write never fails for want of a ticket. A keychain write must record its account first.
+ * Inside the publication fence: record a ticket before credential bytes change, so a writer that
+ * dies mid-publication keeps withholding attestation. Status cannot read while the fence is held,
+ * so a file publication without metadata to update needs no ticket; a keychain write must record
+ * its account first and fails if it cannot.
  */
 function begin(home: string, accounts: readonly string[]): Ticket | null {
   const required = accounts.length > 0;
   try {
-    return locked(home, () => {
+    return (() => {
       if (!required && !exists(pathFor(home))) return null;
       const state = loadForWrite(home);
       if (state.pending.length >= 1024) throw new Error("Too many pending credential publications");
@@ -123,25 +109,24 @@ function begin(home: string, accounts: readonly string[]): Ticket | null {
       advance(state);
       save(home, state);
       return ticket;
-    }, required ? LOCK_ATTEMPTS : 1);
+    })();
   } catch (error) {
     if (required) throw error;
     return null;
   }
 }
 
-/** Never throws: a ticket that cannot be closed keeps withholding attestation instead. */
+/** Inside the fence. Never throws: a ticket that cannot be closed keeps withholding attestation. */
 function finish(home: string, ticket: Ticket | null, removed: readonly string[]): void {
   if (ticket) {
     try {
-      locked(home, () => {
-        const state = loadForWrite(home);
-        if (!state.pending.some(t => t.id === ticket.id && t.pid === ticket.pid)) return;
+      const state = loadForWrite(home);
+      if (state.pending.some(t => t.id === ticket.id && t.pid === ticket.pid)) {
         state.pending = state.pending.filter(t => t.id !== ticket.id);
         state.keyAccounts = state.keyAccounts.filter(k => !removed.includes(k));
         advance(state);
         save(home, state);
-      });
+      }
     } catch { /* the pending ticket keeps the field omitted until a runtime restart clears it */ }
   }
   observers.get(home)?.();
@@ -154,26 +139,31 @@ export interface CredentialPublication {
   absent?: (completed: boolean) => readonly string[];
 }
 
+/** Every instrumented credential write runs here, inside the publication fence (fails if it cannot be taken). */
 export function publishCredentialSync<T>(write: () => T, publication: CredentialPublication = {}): T {
   const home = getConfigDir();
-  const ticket = begin(home, publication.accounts ?? []);
-  let completed = false;
-  try {
-    const result = write();
-    if (result instanceof Promise) throw new Error("Synchronous credential publication returned a Promise");
-    completed = true;
-    return result;
-  } finally {
-    let removed: readonly string[] = [];
-    try { removed = publication.absent?.(completed) ?? []; } catch { /* unverified stays counted */ }
-    finish(home, ticket, removed);
-  }
+  return withCredentialPublicationFence(home, () => {
+    const ticket = begin(home, publication.accounts ?? []);
+    let completed = false;
+    try {
+      const result = write();
+      if (result instanceof Promise) throw new Error("Synchronous credential publication returned a Promise");
+      completed = true;
+      return result;
+    } finally {
+      let removed: readonly string[] = [];
+      try { removed = publication.absent?.(completed) ?? []; } catch { /* unverified stays counted */ }
+      finish(home, ticket, removed);
+    }
+  });
 }
 export async function publishCredentialAsync<T>(write: () => Promise<T>): Promise<T> {
   const home = getConfigDir();
-  const ticket = begin(home, []);
-  try { return await write(); }
-  finally { finish(home, ticket, []); }
+  return await withCredentialPublicationFenceAsync(home, async () => {
+    const ticket = begin(home, []);
+    try { return await write(); }
+    finally { finish(home, ticket, []); }
+  });
 }
 
 /**
@@ -181,7 +171,7 @@ export async function publishCredentialAsync<T>(write: () => Promise<T>): Promis
  * tickets of dead writers, start a new epoch and take the observer's OS lease.
  */
 export function claimCredentialObservation(home: string, scan: (accounts: readonly string[]) => string): { owner: string; close(): void } {
-  return locked(home, () => {
+  return withCredentialPublicationFence(home, () => {
     const state = loadForWrite(home);
     if (observationAlive(state, home)) throw new Error("Credential observer already running");
     if (state.pending.some(t => processAlive(t.pid))) throw new Error("Credential publication still running");
@@ -200,10 +190,10 @@ export function claimCredentialObservation(home: string, scan: (accounts: readon
 }
 /**
  * Advance on every observed event and rescan; a failed scan leaves an empty vector, which never
- * attests. One lock attempt: the runtime observer retries asynchronously instead of blocking.
+ * attests. It never waits for the fence: the runtime observer retries asynchronously instead.
  */
 export function updateCredentialObservation(home: string, owner: string, scan: ((accounts: readonly string[]) => string) | null): void {
-  locked(home, () => {
+  withCredentialPublicationFence(home, () => {
     const state = loadForWrite(home);
     if (state.coverage?.owner !== owner) return;
     advance(state);
@@ -213,7 +203,7 @@ export function updateCredentialObservation(home: string, owner: string, scan: (
       catch { state.coverage.vector = ""; }
     }
     save(home, state);
-  }, 1);
+  }, 0);
 }
 export function registerCredentialObserver(home: string, reconcile: () => void): () => void {
   if (observers.has(home)) throw new Error("Credential observer already registered");
